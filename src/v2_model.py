@@ -1,4 +1,5 @@
 # Copyright 2025 EditMGT Team. All rights reserved.
+import os
 import torch
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, AutoModel, AutoTokenizer
 from diffusers import VQModel
@@ -118,8 +119,10 @@ def init_text_encoder(text_encoder_architecture, pretrained_model_name_or_path=N
         joint_attention_dim, pooled_projection_dim = 2304, 1024
         from transformers import AutoModel, AutoTokenizer, AutoModelForCausalLM
         if text_encoder_architecture == "CLIP_Gemma2":
-            model_gemma = AutoModelForCausalLM.from_pretrained("google/gemma-2-2b-it", output_hidden_states=True)
-            tokenizer_gemma = AutoTokenizer.from_pretrained("google/gemma-2-2b-it")
+            local_llm = os.path.join(pretrained_model_name_or_path, "llm_encoder")
+            gemma_source = local_llm if os.path.isdir(local_llm) else "google/gemma-2-2b-it"
+            model_gemma = AutoModelForCausalLM.from_pretrained(gemma_source, output_hidden_states=True)
+            tokenizer_gemma = AutoTokenizer.from_pretrained(gemma_source)
         elif text_encoder_architecture == "CLIP_Gemma1":
             model_gemma = AutoModelForCausalLM.from_pretrained("google/gemma-1.1-2b-it", output_hidden_states=True)
             tokenizer_gemma = AutoTokenizer.from_pretrained("google/gemma-1.1-2b-it")
@@ -188,4 +191,3 @@ def get_pipeline(
             tokenizer_t5=tokenizer[1]
         )
     return pipe
-

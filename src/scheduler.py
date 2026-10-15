@@ -99,6 +99,8 @@ class Scheduler(SchedulerMixin, ConfigMixin):
         local_guidance: float = 0,
         local_scores: torch.Tensor = None,
         ref_latents: torch.Tensor = None,
+        edit_mask: torch.Tensor = None,
+        source_tokens: torch.Tensor = None,
     ) -> Union[SchedulerOutput, Tuple]:
         two_dim_input = sample.ndim == 3 and model_output.ndim == 4
 
@@ -107,7 +109,15 @@ class Scheduler(SchedulerMixin, ConfigMixin):
             sample = sample.reshape(batch_size, height * width)
             model_output = model_output.reshape(batch_size, codebook_size, height * width).permute(0, 2, 1)
 
+        if edit_mask is not None:
+            if source_tokens is None:
+                raise ValueError("source_tokens must be provided together with edit_mask")
+            edit_mask = edit_mask.to(device=sample.device, dtype=torch.bool).reshape(sample.shape)
+            source_tokens = source_tokens.to(device=sample.device, dtype=sample.dtype).reshape(sample.shape)
+
         unknown_map = sample == self.config.mask_token_id
+        if edit_mask is not None:
+            unknown_map = unknown_map & edit_mask
 
         # probs contains the model's predicted probability for all possible tokens at each position
         probs = model_output.softmax(dim=-1)
@@ -123,6 +133,8 @@ class Scheduler(SchedulerMixin, ConfigMixin):
         # For masked positions (unknown_map is True), use the new token obtained by sampling; 
         # for unmasked positions, keep the original token unchanged
         pred_original_sample = torch.where(unknown_map, pred_original_sample, sample) # torch.Size([1, 1024])
+        if edit_mask is not None:
+            pred_original_sample = torch.where(edit_mask, pred_original_sample, source_tokens)
 
         if local_guidance > 0 and local_scores is not None:
             # Tokens where local_map is True (this means they do not need to be flipped, just keep them as they are)
@@ -147,9 +159,13 @@ class Scheduler(SchedulerMixin, ConfigMixin):
             else:
                 raise ValueError(f"unknown masking schedule {self.config.masking_schedule}")
 
-            mask_ratio = starting_mask_ratio * mask_ratio
-
-            mask_len = (seq_len * mask_ratio).floor()  # [bs, 1]
+            if edit_mask is None:
+                mask_ratio = starting_mask_ratio * mask_ratio
+                mask_len = (seq_len * mask_ratio).floor()  # [bs, 1]
+            else:
+                # The schedule is defined over the editable token population,
+                # independently for every sample in the batch.
+                mask_len = (edit_mask.sum(dim=-1, keepdim=True) * mask_ratio).floor()
             # Get the probability of predicting the token at each position. 
             # Use torch.gather to extract the probability value corresponding to the selected token from probs
             # This probability value is subsequently used to determine which positions need to be re-masked 
@@ -168,6 +184,13 @@ class Scheduler(SchedulerMixin, ConfigMixin):
             
             # Masks tokens with lower confidence.
             prev_sample = torch.where(masking, self.config.mask_token_id, pred_original_sample)
+
+        if edit_mask is not None:
+            # Hard invariant: model predictions and re-masking can never modify
+            # source tokens outside the edit region.
+            prev_sample = torch.where(edit_mask, prev_sample, source_tokens)
+            if not torch.equal(prev_sample[~edit_mask], source_tokens[~edit_mask]):
+                raise AssertionError("Preserve-region tokens changed during sampling")
 
         if two_dim_input:
             prev_sample = prev_sample.reshape(batch_size, height, width)
@@ -204,4 +227,3 @@ class Scheduler(SchedulerMixin, ConfigMixin):
         masked_sample[mask_indices] = self.config.mask_token_id
 
         return masked_sample
-

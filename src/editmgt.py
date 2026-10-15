@@ -6,8 +6,13 @@ from src.scheduler import Scheduler
 from src.pipeline import Pipeline
 from src.transformer import Transformer2DModel
 
-def init_edit_mgt(device, enable_bf16=False):
-    base_model_path = 'WeiChow/EditMGT'
+def init_edit_mgt(
+    device,
+    enable_bf16=False,
+    base_model_path='WeiChow/EditMGT',
+    transformer_subfolder='editmgt',
+    transformer_path=None,
+):
     text_encoder_clip = CLIPTextModelWithProjection.from_pretrained(
         base_model_path, subfolder="text_encoder"
     )
@@ -24,14 +29,20 @@ def init_edit_mgt(device, enable_bf16=False):
     scheduler = Scheduler.from_pretrained(
         base_model_path, subfolder="scheduler",
     )
+    transformer_source = transformer_path or base_model_path
+    transformer_source_subfolder = None if transformer_path else transformer_subfolder
     if enable_bf16:
         text_encoder = [t.to(torch.bfloat16) for t in text_encoder]
         vq_model = vq_model.to(torch.bfloat16)
         # model = Transformer2DModel.from_pretrained(base_model_path, subfolder="transformer", torch_dtype=torch.bfloat16)
-        model = Transformer2DModel.from_pretrained(base_model_path, subfolder="editmgt", torch_dtype=torch.bfloat16)
+        model = Transformer2DModel.from_pretrained(
+            transformer_source, subfolder=transformer_source_subfolder, torch_dtype=torch.bfloat16
+        )
     else:
         # model = Transformer2DModel.from_pretrained(base_model_path, subfolder="transformer")
-        model = Transformer2DModel.from_pretrained(base_model_path, subfolder="editmgt")
+        model = Transformer2DModel.from_pretrained(
+            transformer_source, subfolder=transformer_source_subfolder
+        )
     
     pipe = Pipeline(
         transformer=model,

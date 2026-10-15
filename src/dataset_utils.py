@@ -13,6 +13,79 @@ from torch.utils.data import IterableDataset
 import pyarrow.fs as fs
 import io
 import json
+from src.mask_utils import normalize_edit_mask_image, resize_binary_edit_mask
+
+EDIT_MASK_KEYS = ("edit_mask", "mask", "mask_image", "editing_mask", "mask_png")
+
+
+def _decode_image_value(value):
+    """Decode common parquet/HuggingFace image representations into PIL."""
+    if isinstance(value, Image.Image):
+        return value
+    if isinstance(value, dict):
+        if value.get("bytes") is not None:
+            return Image.open(io.BytesIO(value["bytes"]))
+        if value.get("path") is not None:
+            return Image.open(value["path"])
+    if isinstance(value, (bytes, bytearray)):
+        return Image.open(io.BytesIO(value))
+    if isinstance(value, str):
+        return Image.open(value)
+    raise TypeError(f"Unsupported image value type: {type(value)!r}")
+
+
+def _get_edit_mask(sample):
+    for key in EDIT_MASK_KEYS:
+        if key in sample and sample[key] is not None:
+            return _decode_image_value(sample[key])
+    raise KeyError(f"Edit-only training requires one of mask fields: {EDIT_MASK_KEYS}")
+
+
+def process_edit_sample(target_image, source_image, edit_mask, size, norm=False, ensure_edit_in_crop=False):
+    """Apply one shared resize/crop to target, source, and edit mask.
+
+    Returned ``edit_mask`` is float [1,H,W], with 1 denoting the region to edit.
+    """
+    target_image = exif_transpose(target_image).convert("RGB")
+    source_image = exif_transpose(source_image).convert("RGB")
+    edit_mask = normalize_edit_mask_image(edit_mask)
+    orig_height, orig_width = target_image.height, target_image.width
+
+    target_image = transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR)(target_image)
+    resized_size = (target_image.height, target_image.width)
+    source_image = transforms.functional.resize(
+        source_image, resized_size, interpolation=transforms.InterpolationMode.BILINEAR
+    )
+    edit_mask = resize_binary_edit_mask(edit_mask, resized_size)
+    c_top, c_left, _, _ = transforms.RandomCrop.get_params(target_image, output_size=(size, size))
+    if ensure_edit_in_crop:
+        positive_mask = transforms.ToTensor()(edit_mask)[0].ge(0.5)
+        if not positive_mask[c_top:c_top + size, c_left:c_left + size].any() and positive_mask.any():
+            # Inter-Edit contains portrait/landscape images with localized masks.
+            # If a random square crop misses the edit, anchor it on a positive pixel.
+            positive_positions = positive_mask.nonzero(as_tuple=False)
+            anchor = positive_positions[torch.randint(len(positive_positions), (1,)).item()]
+            row, col = anchor.tolist()
+            c_top = torch.randint(max(0, row - size + 1), min(row, target_image.height - size) + 1, (1,)).item()
+            c_left = torch.randint(max(0, col - size + 1), min(col, target_image.width - size) + 1, (1,)).item()
+
+    def crop(image):
+        return transforms.functional.crop(image, c_top, c_left, size, size)
+
+    target_tensor = transforms.ToTensor()(crop(target_image))
+    source_tensor = transforms.ToTensor()(crop(source_image))
+    mask_tensor = transforms.ToTensor()(crop(edit_mask)).ge(0.5).float()
+    if norm:
+        normalize = transforms.Normalize([0.5] * 3, [0.5] * 3)
+        target_tensor = normalize(target_tensor)
+        source_tensor = normalize(source_tensor)
+
+    return {
+        "image": target_tensor,
+        "reference_image": source_tensor,
+        "edit_mask": mask_tensor,
+        "micro_conds": torch.tensor([orig_width, orig_height, c_top, c_left, 6.0]),
+    }
 
 def move_batch_prompt_device(prompts, device, split=False, non_blocking=None):
     def move(tensor):
@@ -353,7 +426,7 @@ class HDFSParquetDataset(IterableDataset):
         while True:
             for file_path in worker_files:
                 try:
-                    table = pq.read_table(file_path, filesystem=self.hdfs)
+                    table = self._read_parquet(file_path)
                     batch_dict = table.to_pydict()
                     
                    # Check if there is data
@@ -392,6 +465,9 @@ class HDFSParquetDataset(IterableDataset):
         # Use rank-specific seeds to ensure different ranks have different random sequences
         return self._generate_samples(seed=42 + self.rank)
 
+    def _read_parquet(self, file_path):
+        return pq.read_table(file_path, filesystem=self.hdfs)
+
 class HuggingFaceDataset(Dataset):
     def __init__(
         self,
@@ -402,6 +478,7 @@ class HuggingFaceDataset(Dataset):
         prompt_prefix=None,
         size=512,
         text_encoder_architecture='CLIP', 
+        require_edit_mask=False,
     ):
         self.size = size
         self.image_key = image_key
@@ -410,6 +487,7 @@ class HuggingFaceDataset(Dataset):
         self.hf_dataset = hf_dataset
         self.prompt_prefix = prompt_prefix
         self.text_encoder_architecture = text_encoder_architecture
+        self.require_edit_mask = require_edit_mask
 
     def __len__(self):
         return len(self.hf_dataset)
@@ -436,7 +514,15 @@ class HuggingFaceEditDataset(HuggingFaceDataset):
     def __getitem__(self, index):
         item = self.hf_dataset[index]
 
-        rv = process_image(item['edited_file'], self.size)  # edit results
+        if self.require_edit_mask:
+            rv = process_edit_sample(
+                _decode_image_value(item['edited_file']),
+                _decode_image_value(item['image_file']),
+                _get_edit_mask(item),
+                self.size,
+            )
+        else:
+            rv = process_image(item['edited_file'], self.size)  # edit results
 
         prompt = item[self.prompt_key]
 
@@ -449,14 +535,16 @@ class HuggingFaceEditDataset(HuggingFaceDataset):
         else:
             rv["prompt_input_ids"] = tokenize_prompt(self.tokenizer, prompt, self.text_encoder_architecture)[0]
 
-        rv['reference_image'] = process_image(item["image_file"], size=self.size)['image'] # raw image
+        if not self.require_edit_mask:
+            rv['reference_image'] = process_image(item["image_file"], size=self.size)['image'] # raw image
 
         return rv
 
 class HDFSEditParquetDataset(HDFSParquetDataset):
     def __init__(self, root_dir, tokenizer=None, 
                  size=512, text_encoder_architecture='CLIP', norm=False,
-                 rank=0, world_size=1, shuffle=True, repeat=True, train_edit_model=True):
+                 rank=0, world_size=1, shuffle=True, repeat=True, train_edit_model=True,
+                 require_edit_mask=False):
         # Use different seeds to ensure diversity in each rank
         random.seed(23 + rank)
         
@@ -467,6 +555,7 @@ class HDFSEditParquetDataset(HDFSParquetDataset):
         self.size = size
         self.text_encoder_architecture = text_encoder_architecture
         self.norm = norm
+        self.require_edit_mask = require_edit_mask
         
         # Distributed training parameters
         self.rank = rank
@@ -492,31 +581,84 @@ class HDFSEditParquetDataset(HDFSParquetDataset):
             instruction = sample['instruction']
    
         if 'output' in sample.keys():
-            edited_file = Image.open(io.BytesIO(sample['output']['bytes']))
+            edited_file = _decode_image_value(sample['output'])
         elif 'output_img' in sample.keys():
-            edited_file = Image.open(io.BytesIO(sample['output_img']['bytes']))
+            edited_file = _decode_image_value(sample['output_img'])
         elif 'generated_image' in sample.keys():
-            edited_file = Image.open(io.BytesIO(sample['generated_image']))
+            edited_file = _decode_image_value(sample['generated_image'])
         else:
-            edited_file = Image.open(io.BytesIO(sample['edited_file']['bytes']))
+            edited_file = _decode_image_value(sample['edited_file'])
 
-        rv = process_image(edited_file, self.size, self.norm) # edit results
+        if 'input' in sample.keys():
+            image_file = _decode_image_value(sample['input'])
+        elif 'input_img' in sample.keys():
+            image_file = _decode_image_value(sample['input_img'])
+        else:
+            image_file = _decode_image_value(sample['image_file'])
+
+        if self.require_edit_mask:
+            rv = process_edit_sample(
+                edited_file, image_file, _get_edit_mask(sample), self.size, self.norm
+            )
+        else:
+            rv = process_image(edited_file, self.size, self.norm) # edit results
+            rv['reference_image'] = process_image(image_file, size=self.size, norm=self.norm)['image'] # raw image
 
         if isinstance(self.tokenizer, list):
             _tmp_ = tokenize_prompt(self.tokenizer, instruction, self.text_encoder_architecture)
             rv["prompt_input_ids"] = [_tmp_[0][0], _tmp_[1][0]]
         else:
             rv["prompt_input_ids"] = tokenize_prompt(self.tokenizer, instruction, self.text_encoder_architecture)[0]
-        
-        if 'input' in sample.keys():
-            image_file = Image.open(io.BytesIO(sample['input']['bytes']))
-        elif 'input_img' in sample.keys():
-            image_file = Image.open(io.BytesIO(sample['input_img']['bytes']))
-        else:
-            try:
-                image_file = Image.open(io.BytesIO(sample['image_file']['bytes']))
-            except:
-                image_file = Image.open(io.BytesIO(sample['image_file']))
-
-        rv['reference_image'] = process_image(image_file, size=self.size, norm=self.norm)['image'] # raw image
         return rv
+
+
+class LocalEditParquetDataset(HDFSEditParquetDataset):
+    """Stream a deterministic train/test file split from local parquet files."""
+
+    def __init__(
+        self,
+        root_dir,
+        split_manifest,
+        split="train",
+        tokenizer=None,
+        size=512,
+        text_encoder_architecture="CLIP",
+        norm=False,
+        rank=0,
+        world_size=1,
+        shuffle=True,
+        repeat=True,
+        require_edit_mask=True,
+    ):
+        if split not in ("train", "test"):
+            raise ValueError(f"split must be 'train' or 'test', got {split!r}")
+        random.seed(23 + rank)
+        self.root_dir = root_dir
+        self.tokenizer = tokenizer
+        self.size = size
+        self.text_encoder_architecture = text_encoder_architecture
+        self.norm = norm
+        self.rank = rank
+        self.world_size = world_size
+        self.shuffle = shuffle
+        self.repeat = repeat
+        self.require_edit_mask = require_edit_mask
+
+        with open(split_manifest, "r") as handle:
+            manifest = json.load(handle)
+        if split not in manifest:
+            raise KeyError(f"Split manifest has no {split!r} entry: {split_manifest}")
+        self.parquet_files = [
+            path if os.path.isabs(path) else os.path.join(root_dir, path)
+            for path in manifest[split]
+        ]
+        if not self.parquet_files:
+            raise ValueError(f"No parquet files in {split!r} split")
+        missing = [path for path in self.parquet_files if not os.path.isfile(path)]
+        if missing:
+            raise FileNotFoundError(f"Missing parquet file from manifest: {missing[0]}")
+        if world_size > 1:
+            self._distribute_files_across_ranks()
+
+    def _read_parquet(self, file_path):
+        return pq.read_table(file_path)

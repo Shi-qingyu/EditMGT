@@ -6,7 +6,7 @@ import math
 import os
 import json
 from pathlib import Path
-import wandb
+from datetime import timedelta
 import sys
 sys.path.append(os.getcwd())
 import torch
@@ -15,15 +15,11 @@ import torch.nn.functional as F
 import diffusers.optimization
 from accelerate import Accelerator
 from accelerate.logging import get_logger
-from accelerate.utils import ProjectConfiguration, set_seed
-from datasets import load_dataset
-from PIL import Image
+from accelerate.utils import ProjectConfiguration, InitProcessGroupKwargs, set_seed
 from termcolor import cprint
 from peft import LoraConfig
 from peft.utils import get_peft_model_state_dict
 from torch.utils.data import DataLoader, default_collate
-from torchvision import transforms
-from torchvision.utils import make_grid
 from diffusers import EMAModel
 from diffusers.loaders import LoraLoaderMixin
 from diffusers.utils import is_wandb_available
@@ -31,14 +27,22 @@ from src.v2_utils import save_checkpoint, prepare_cond_token
 from src.transformer import Transformer2DModel, get_text_encoder_length, load_lora_adapter
 from src.pipeline import _prepare_latent_image_ids
 from src.dataset_utils import HuggingFaceDataset, HuggingFaceEditDataset, HDFSParquetDataset, HDFSEditParquetDataset, \
-                                tokenize_prompt, encode_prompt, move_batch_prompt_device
+                                LocalEditParquetDataset, tokenize_prompt, encode_prompt, move_batch_prompt_device
 from src.v2_model import init_text_encoder, init_base_model, negative_prompt, get_pipeline
+from src.mask_utils import (
+    prepare_edit_only_corruption,
+    resize_edit_mask_to_tokens,
+    save_mask_debug_visualization,
+)
+from src.inter_edit_dataset import DEFAULT_INTER_EDIT_ROOT, InterEditDataset
+from src.train_validation import (
+    prepare_inter_edit_validation_cases,
+    run_inter_edit_validation,
+    synchronized_main_process_call,
+    validation_model_state,
+)
 
 logger = get_logger(__name__, log_level="INFO")
-
-import torch._dynamo
-torch._dynamo.config.verbose = True
-torch._dynamo.config.suppress_errors = True
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ['NCCL_DEBUG'] = 'ERROR'
@@ -72,6 +76,12 @@ def parse_args():
         default=None,
         required=False,
         help="Revision of pretrained model identifier from huggingface.co/models.",
+    )
+    parser.add_argument(
+        "--transformer_subfolder",
+        type=str,
+        default="transformer",
+        help="Transformer weights subfolder (use 'editmgt' to fine-tune the released editing checkpoint).",
     )
     parser.add_argument(
         "--variant",
@@ -206,13 +216,25 @@ def parse_args():
     parser.add_argument(
         "--validation_steps",
         type=int,
-        default=100,
-        help=(
-            "Run validation every X steps. Validation consists of running the prompt"
-            " `args.validation_prompt` multiple times: `args.num_validation_images`"
-            " and logging the images."
-        ),
+        default=200,
+        help="Save validation images every X optimizer steps; 0 disables validation.",
     )
+    parser.add_argument("--validation_data_dir", type=str, default=None,
+                        help="Inter-Edit root for test visualizations (defaults to the training data root).")
+    parser.add_argument("--validation_num_images", type=int, default=5,
+                        help="Fixed test cases, choosing different edit types first.")
+    parser.add_argument("--validation_sample_indices", type=int, nargs="+", default=None,
+                        help="Explicit test row indices; overrides --validation_num_images.")
+    parser.add_argument("--validation_num_inference_steps", type=int, default=18)
+    parser.add_argument("--validation_guidance_scale", type=float, default=6.0)
+    parser.add_argument("--validation_reference_strength", type=float, default=1.0)
+    parser.add_argument("--validation_disable_reference_kv_cache", action="store_true",
+                        help="Recompute the full reference at every validation inference step.")
+    parser.add_argument("--validation_reference_kv_cache_threshold", type=float, default=0.3,
+                        help="Capture reference K/V when the scheduled remaining editable mask fraction is <= this value.")
+    parser.add_argument("--validation_seed", type=int, default=42)
+    parser.add_argument("--validation_at_start", action="store_true",
+                        help="Also visualize the initial/resumed model before training updates.")
     parser.add_argument(
         "--mixed_precision",
         type=str,
@@ -229,8 +251,8 @@ def parse_args():
         type=str,
         default="wandb",
         help=(
-            'The integration to report the results and logs to. Supported platforms are `"tensorboard"`'
-            ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
+            'Logging integration: "wandb" (default), "tensorboard", "comet_ml", or "all". '
+            'Use "none" to disable external trackers; local validation images are still saved.'
         ),
     )
     parser.add_argument("--validation_prompts", type=str, nargs="*")
@@ -244,6 +266,12 @@ def parse_args():
         ),
     )
     parser.add_argument("--split_vae_encode", type=int, required=False, default=None)
+    parser.add_argument("--split_manifest", type=str, default=None)
+    parser.add_argument("--dataset_split", choices=["train", "test"], default="train")
+    parser.add_argument(
+        "--dataset_cache_dir", type=str, default=None,
+        help="Writable tar member-index cache for InterEditDataset (default: data/inter_edit_tar_index).",
+    )
     parser.add_argument("--min_masking_rate", type=float, default=0.0)
     parser.add_argument("--cond_dropout_prob", type=float, default=0.0)
     parser.add_argument("--max_grad_norm", default=50.0, type=float, help="Max gradient norm.", required=False)
@@ -256,10 +284,51 @@ def parse_args():
         action="store_true",
         help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",
     )
+    parser.add_argument(
+        "--compile_model", action="store_true",
+        help="Opt in to torch.compile; default is eager training for variable-length sparse targets.",
+    )
+    parser.add_argument(
+        "--compile_backend", choices=["inductor", "aot_eager", "eager"], default="inductor",
+        help="Backend used only with --compile_model. aot_eager/eager are compiler diagnostic options.",
+    )
     parser.add_argument("--prompt_prefix", type=str, required=False, default=None)
     parser.add_argument("--wandb_id", default=None)
     parser.add_argument("--train_edit_model", default=False, help='Train T2I model is False; Train edit model is True')
+    parser.add_argument(
+        "--edit_only_diffusion",
+        action="store_true",
+        help="Corrupt and supervise only GT edit-mask tokens; preserve tokens come from the source image.",
+    )
+    parser.add_argument(
+        "--sparse_target", action="store_true",
+        help="Use full reference + sparse edit/halo target tokens; enables --edit_only_diffusion.",
+    )
+    parser.add_argument(
+        "--sparse_target_halo", type=int, default=1,
+        help="Sparse target halo radius on the Transformer grid after downsampling.",
+    )
+    parser.add_argument(
+        "--mask_debug_dir",
+        type=str,
+        default=None,
+        help="Optionally save one source/mask/token-mask alignment panel here.",
+    )
     args = parser.parse_args()
+    if args.report_to.lower() == "none":
+        args.report_to = None
+    if args.validation_steps < 0:
+        parser.error("--validation_steps must be non-negative (0 disables validation)")
+    if args.validation_num_images < 1 or args.validation_num_inference_steps < 1:
+        parser.error("Validation image count and inference steps must be positive")
+    if not 0.0 <= args.validation_reference_kv_cache_threshold <= 1.0:
+        parser.error("--validation_reference_kv_cache_threshold must be between 0 and 1")
+    if args.sparse_target_halo < 0:
+        parser.error("--sparse_target_halo must be non-negative")
+    if args.sparse_target:
+        args.edit_only_diffusion = True
+    if args.edit_only_diffusion and not args.train_edit_model:
+        parser.error("--edit_only_diffusion/--sparse_target requires --train_edit_model")
 
     if args.report_to == "wandb":
         if not is_wandb_available():
@@ -267,7 +336,32 @@ def parse_args():
 
     return args
 
+def initialize_local_cuda_device():
+    """Bind each DDP worker before NCCL/Accelerator can initialize CUDA."""
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    if local_rank < 0:
+        return
+    visible_count = torch.cuda.device_count()
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", local_rank + 1))
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>")
+    if local_rank >= visible_count or local_world_size > visible_count:
+        # Accelerate 1.0.1 otherwise wraps local_rank modulo visible_count,
+        # which can place several workers on the same GPU.
+        raise RuntimeError(
+            f"Invalid DDP GPU mapping: LOCAL_RANK={local_rank}, LOCAL_WORLD_SIZE={local_world_size}, "
+            f"visible CUDA devices={visible_count}, CUDA_VISIBLE_DEVICES={visible_devices!r}. "
+            "Launch at most one worker per visible GPU."
+        )
+    print(
+        f"[rank {os.environ.get('RANK', local_rank)}] LOCAL_RANK={local_rank}, "
+        f"device=cuda:{local_rank}, visible GPUs={visible_count}, "
+        f"CUDA_VISIBLE_DEVICES={visible_devices}", flush=True,
+    )
+    torch.cuda.set_device(local_rank)
+
+
 def main(args):
+    wandb = None
     if args.allow_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -275,19 +369,33 @@ def main(args):
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
 
-    accelerator = Accelerator(
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        mixed_precision=args.mixed_precision,
-        log_with=args.report_to,
-        project_config=accelerator_project_config,
-    )
+    try:
+        initialize_local_cuda_device()
+        accelerator = Accelerator(
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            mixed_precision=args.mixed_precision,
+            log_with=args.report_to,
+            project_config=accelerator_project_config,
+            # Compilation is controlled explicitly below. Do not let a launcher
+            # configuration silently re-enable Inductor for the eager default.
+            dynamo_backend="no",
+            # Other ranks wait while rank zero reads test tar indexes or generates
+            # preview images; allow a cold shared filesystem more than 10 minutes.
+            kwargs_handlers=[InitProcessGroupKwargs(timeout=timedelta(minutes=30))],
+        )
+    except RuntimeError as error:
+        if "out of memory" not in str(error).lower():
+            raise
+        raise RuntimeError(
+            "CUDA ran out of memory during device/distributed initialization, before loading any models. "
+            f"RANK={os.environ.get('RANK', '0')}, LOCAL_RANK={os.environ.get('LOCAL_RANK', '<unset>')}, "
+            f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')!r}. "
+            "Check GPU memory/process ownership and worker-to-GPU mapping. "
+            "Reducing the training batch size does not reduce this initialization allocation."
+        ) from error
 
     if accelerator.is_main_process:
         os.makedirs(args.output_dir, exist_ok=True)
-
-    if accelerator.is_main_process:
-        if args.report_to == "wandb":
-            wandb.init(project='editmgt', entity=os.environ["WANDB_ENTITY"], name=args.output_dir.split('/')[-1], id=args.wandb_id)
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -298,10 +406,48 @@ def main(args):
     logger.info(accelerator.state, main_process_only=False)
 
     if accelerator.is_main_process:
-        accelerator.init_trackers("meic", config=vars(copy.deepcopy(args)))
+        tracker_init_kwargs = {}
+        if args.report_to in ("wandb", "all") and is_wandb_available():
+            import wandb
+
+            wandb_kwargs = {"name": Path(args.output_dir).name}
+            # Let the SDK use the account's configured default entity when
+            # WANDB_ENTITY is absent; an explicit team/user remains supported.
+            wandb_entity = os.environ.get("WANDB_ENTITY")
+            if wandb_entity:
+                wandb_kwargs["entity"] = wandb_entity
+            if args.wandb_id:
+                wandb_kwargs.update(id=args.wandb_id, resume="allow")
+            tracker_init_kwargs["wandb"] = wandb_kwargs
+        # Initialize W&B exactly once, through Accelerate, so training metrics
+        # and visualization images belong to the same run and finish together.
+        accelerator.init_trackers(
+            os.environ.get("WANDB_PROJECT") or "editmgt",
+            config=vars(copy.deepcopy(args)), init_kwargs=tracker_init_kwargs,
+        )
 
     if args.seed is not None:
         set_seed(args.seed)
+
+    validation_cases = None
+    validation_output_dir = Path(args.output_dir) / "validation"
+    if args.validation_steps > 0 and args.train_edit_model:
+        validation_data_dir = args.validation_data_dir or (
+            (args.instance_data_dir or DEFAULT_INTER_EDIT_ROOT) if args.instance_dataset == "InterEditDataset" else DEFAULT_INTER_EDIT_ROOT
+        )
+        if Path(validation_data_dir).name == "train" and (Path(validation_data_dir).parent / "test").is_dir():
+            validation_data_dir = str(Path(validation_data_dir).parent)
+        validation_cases = synchronized_main_process_call(
+            accelerator,
+            lambda: prepare_inter_edit_validation_cases(
+                validation_data_dir, validation_output_dir, args.resolution,
+                num_images=args.validation_num_images, sample_indices=args.validation_sample_indices,
+                cache_dir=args.dataset_cache_dir,
+            ),
+            description="Loading Inter-Edit test visualization cases",
+        )
+        if accelerator.is_main_process:
+            logger.info("Fixed Inter-Edit test visualization sample IDs: %s", [case["sample_id"] for case in validation_cases])
 
     text_encoder, tokenizer, text_att_dim, text_proj_dim = init_text_encoder(text_encoder_architecture=args.text_encoder_architecture,
                                 pretrained_model_name_or_path=args.pretrained_model_name_or_path, 
@@ -321,7 +467,7 @@ def main(args):
 
     if args.text_encoder_architecture == 'CLIP':
         model = Transformer2DModel.from_pretrained(args.pretrained_model_name_or_path, 
-                                        subfolder="transformer", low_cpu_mem_usage=False, device_map=None)  
+                                        subfolder=args.transformer_subfolder, low_cpu_mem_usage=False, device_map=None)
     else:
         model = Transformer2DModel(
             patch_size = 1,
@@ -339,7 +485,7 @@ def main(args):
             text_encoder_architecture=args.text_encoder_architecture,
             connector_type='linear' if 'CLIP' != args.text_encoder_architecture else None,
         )
-        model_tmp = Transformer2DModel.from_pretrained(args.pretrained_model_name_or_path,  subfolder="transformer",
+        model_tmp = Transformer2DModel.from_pretrained(args.pretrained_model_name_or_path, subfolder=args.transformer_subfolder,
             low_cpu_mem_usage=False, device_map=None)
         state_dict = model_tmp.state_dict()
 
@@ -352,13 +498,15 @@ def main(args):
 
         del model_tmp 
 
-    model = torch.compile(model)
+    if args.sparse_target:
+        model.enable_sparse_target(halo=args.sparse_target_halo)
 
     if args.use_lora:
         lora_config = LoraConfig(
             r=args.lora_r,
             lora_alpha=args.lora_alpha,
             target_modules=args.lora_target_modules,
+            modules_to_save=["sparse_shape_embed"] if args.sparse_target else None,
         )
         model.add_adapter(lora_config)
 
@@ -376,16 +524,31 @@ def main(args):
             model_config=model.config,
         )
 
+    if args.compile_model:
+        if args.gradient_checkpointing:
+            import torch._dynamo as dynamo
+
+            dynamo.config.optimize_ddp = False
+        logger.info("Opt-in torch.compile backend=%s, dynamic=True", args.compile_backend)
+        model = torch.compile(model, backend=args.compile_backend, dynamic=True)
+    else:
+        logger.info("Training in eager mode; torch.compile is disabled")
+
+    def unwrap_training_model(module):
+        unwrapped = accelerator.unwrap_model(module)
+        return getattr(unwrapped, "_orig_mod", unwrapped)
+
     def save_model_hook(models, weights, output_dir):
         if accelerator.is_main_process:
             transformer_lora_layers_to_save = None
 
             for model_ in models:
-                if isinstance(model_, type(accelerator.unwrap_model(model))):
+                transformer_to_save = unwrap_training_model(model_)
+                if isinstance(transformer_to_save, Transformer2DModel):
                     if args.use_lora:
-                        transformer_lora_layers_to_save = get_peft_model_state_dict(model_)
+                        transformer_lora_layers_to_save = get_peft_model_state_dict(transformer_to_save)
                     else:
-                        model_.save_pretrained(os.path.join(output_dir, "transformer"))
+                        transformer_to_save.save_pretrained(os.path.join(output_dir, "transformer"))
                 else:
                     raise ValueError(f"unexpected save model: {model_.__class__}")
 
@@ -404,6 +567,9 @@ def main(args):
                         return super().default(obj)
                 with open(os.path.join(output_dir, "lora_config.json"), 'w') as f:
                     json.dump(lora_config.to_dict(), f, indent=2, cls=LoraConfigEncoder)
+                if args.sparse_target:
+                    with open(os.path.join(output_dir, "sparse_target_config.json"), "w") as f:
+                        json.dump({"sparse_target_halo": args.sparse_target_halo}, f)
 
             if args.use_ema:
                 ema.save_pretrained(os.path.join(output_dir, "ema_model"))
@@ -411,20 +577,16 @@ def main(args):
     def load_model_hook(models, input_dir):
         transformer = None
 
-        def adap_compile(ori_dict):
-            new_dict = {}
-            for k,v in ori_dict.items():
-                new_dict['_orig_mod.'+k] = v
-            return new_dict
-
         while len(models) > 0:
-            model_ = models.pop()
-            if isinstance(model_, type(accelerator.unwrap_model(model))):
+            model_ = unwrap_training_model(models.pop())
+            if isinstance(model_, Transformer2DModel):
                 if args.use_lora:
                     transformer = model_
                 else:
                     load_model = Transformer2DModel.from_pretrained(os.path.join(input_dir, "transformer"),low_cpu_mem_usage=False,device_map=None)
-                    model_.load_state_dict(adap_compile(load_model.state_dict()))
+                    # Diffusers checkpoints store the original model's keys.
+                    # Load into that model regardless of compile/DDP wrappers.
+                    model_.load_state_dict(load_model.state_dict())
                     del load_model
             else:
                 raise ValueError(f"unexpected save model: {model.__class__}")
@@ -439,7 +601,7 @@ def main(args):
             if os.path.exists(ema_model_path) and os.path.isdir(ema_model_path):
                 try:
                     load_from = EMAModel.from_pretrained(ema_model_path, model_cls=Transformer2DModel)
-                    ema.load_state_dict(adap_compile(load_from.state_dict()))
+                    ema.load_state_dict(load_from.state_dict())
                     del load_from
                     cprint("EMA model loaded successfully", 'red')
                 except Exception as e:
@@ -456,16 +618,48 @@ def main(args):
         )
 
     if args.use_8bit_adam:
+        from importlib.metadata import PackageNotFoundError, version
+        from packaging.version import Version
+
+        try:
+            bnb_version = version("bitsandbytes")
+        except PackageNotFoundError as error:
+            raise ImportError(
+                "8-bit AdamW requires bitsandbytes. Install bitsandbytes==0.48.2 into this "
+                "environment, or use USE_8BIT_ADAM=0 with train/train.sh for PyTorch AdamW."
+            ) from error
+        if (torch.version.cuda is not None and Version(torch.version.cuda) >= Version("13.0")
+                and Version(bnb_version) < Version("0.48.0")):
+            raise RuntimeError(
+                f"bitsandbytes {bnb_version} does not provide CUDA 13 kernels, but PyTorch uses "
+                f"CUDA {torch.version.cuda}. Install bitsandbytes==0.48.2, or select "
+                "USE_8BIT_ADAM=0 for native PyTorch AdamW. No optimizer updates have been performed."
+            )
         try:
             import bitsandbytes as bnb
-        except ImportError:
+            from bitsandbytes.cextension import lib as bnb_library
+        except ImportError as error:
             raise ImportError(
-                "Please install bitsandbytes to use 8-bit Adam. You can do so by running `pip install bitsandbytes`"
+                "Cannot import bitsandbytes CUDA optimizer support. Install bitsandbytes==0.48.2 "
+                "into this environment, or select USE_8BIT_ADAM=0 for PyTorch AdamW."
+            ) from error
+        if bnb_library is None or getattr(bnb_library, "compiled_with_cuda", True) is False:
+            raise RuntimeError(
+                f"bitsandbytes {bnb_version} could not load a CUDA optimizer library for "
+                f"PyTorch CUDA {torch.version.cuda}. Check its native-library loading messages "
+                "and any BNB_CUDA_VERSION override, or select USE_8BIT_ADAM=0. "
+                "A CPU-only bitsandbytes library cannot update this model's CUDA parameters."
             )
 
         optimizer_cls = bnb.optim.AdamW8bit
+        optimizer_kwargs = {}
+        logger.info("Optimizer: bitsandbytes AdamW8bit, bitsandbytes=%s, CUDA=%s", bnb_version, torch.version.cuda)
     else:
         optimizer_cls = torch.optim.AdamW
+        # Avoid the extra parameter-sized temporary buffers of the foreach
+        # implementation when using full-precision optimizer states.
+        optimizer_kwargs = {"foreach": False}
+        logger.info("Optimizer: torch.optim.AdamW (foreach=False)")
 
     # no decay on bias and layernorm and embedding
     no_decay = ["bias", "layer_norm.weight", "mlm_ln.weight", "embeddings.weight"]
@@ -486,6 +680,7 @@ def main(args):
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
+        **optimizer_kwargs,
     )
 
     logger.info("Creating dataloaders and lr_scheduler")
@@ -513,8 +708,34 @@ def main(args):
             text_encoder_architecture=args.text_encoder_architecture,
             rank=accelerator.process_index,
             world_size=accelerator.num_processes,
+            require_edit_mask=args.edit_only_diffusion,
+        )
+    elif args.instance_dataset == "LocalEditParquetDataset":
+        if args.split_manifest is None:
+            raise ValueError("LocalEditParquetDataset requires --split_manifest")
+        dataset = LocalEditParquetDataset(
+            root_dir=args.instance_data_dir,
+            split_manifest=args.split_manifest,
+            split=args.dataset_split,
+            tokenizer=tokenizer,
+            size=args.resolution,
+            text_encoder_architecture=args.text_encoder_architecture,
+            rank=accelerator.process_index,
+            world_size=accelerator.num_processes,
+            require_edit_mask=args.edit_only_diffusion,
+        )
+    elif args.instance_dataset == "InterEditDataset":
+        dataset = InterEditDataset(
+            root_dir=args.instance_data_dir, split=args.dataset_split,
+            tokenizer=tokenizer, size=args.resolution,
+            text_encoder_architecture=args.text_encoder_architecture,
+            rank=accelerator.process_index, world_size=accelerator.num_processes,
+            cache_dir=args.dataset_cache_dir, seed=args.seed if args.seed is not None else 42,
         )
     elif args.instance_dataset == 'HuggingFaceDataset':
+        # Inter-Edit and local parquet readers do not depend on HF datasets.
+        from datasets import load_dataset
+
         dataset = HuggingFaceDataset(
             hf_dataset=load_dataset(args.instance_data_dir, split="train"),
             tokenizer=tokenizer,
@@ -525,6 +746,8 @@ def main(args):
             text_encoder_architecture=args.text_encoder_architecture,
         )
     elif args.instance_dataset == 'HuggingFaceEditDataset':
+        from datasets import load_dataset
+
         dataset = HuggingFaceEditDataset(
             hf_dataset=load_dataset(args.instance_data_dir, split="replace"), # example: read Bin1117/AnyEdit
             tokenizer=tokenizer,
@@ -533,15 +756,16 @@ def main(args):
             prompt_prefix=args.prompt_prefix,
             size=args.resolution,
             text_encoder_architecture=args.text_encoder_architecture,
+            require_edit_mask=args.edit_only_diffusion,
         )
     else:
         assert False
 
-    if args.instance_dataset in ["HDFSParquetDataset", 'HDFSEditParquetDataset']:
+    if args.instance_dataset in ["HDFSParquetDataset", "HDFSEditParquetDataset", "LocalEditParquetDataset", "InterEditDataset"]:
         train_dataloader = DataLoader(
             dataset,
             batch_size=args.train_batch_size,
-            num_workers=accelerator.num_processes,
+            num_workers=args.dataloader_num_workers,
             collate_fn=default_collate,
             pin_memory=True,
         )
@@ -565,9 +789,15 @@ def main(args):
 
     logger.info("Preparing model, optimizer and dataloaders")
 
-    model, optimizer, lr_scheduler, train_dataloader = accelerator.prepare(
-        model, optimizer, lr_scheduler, train_dataloader
-    )
+    if args.instance_dataset == "InterEditDataset":
+        # Rank/worker ownership is already handled by the dataset. Preparing the
+        # loader again would dispatch/shard it a second time and lose coverage.
+        # The training loop moves each input tensor to accelerator.device.
+        model, optimizer, lr_scheduler = accelerator.prepare(model, optimizer, lr_scheduler)
+    else:
+        model, optimizer, lr_scheduler, train_dataloader = accelerator.prepare(
+            model, optimizer, lr_scheduler, train_dataloader
+        )
 
     train_dataloader.num_batches = len(train_dataloader)
 
@@ -634,6 +864,79 @@ def main(args):
     # This is to solve the inconsistent tensor device issue
     if args.use_ema:
         ema.shadow_params = [p.to(accelerator.device) for p in ema.shadow_params]
+
+    if args.edit_only_diffusion and not args.train_edit_model:
+        raise ValueError("--edit_only_diffusion requires --train_edit_model and source/reference images")
+    mask_debug_saved = False
+
+    last_validation_step = -1
+
+    def generate_validation(step):
+        # Use the same weights without triggering a new torch.compile inference
+        # graph for each sparse sequence length.
+        validation_model = unwrap_training_model(model)
+        logger.info("Generating validation images at optimizer step %s", step)
+        pipe = None
+        try:
+            with validation_model_state(validation_model, ema if args.use_ema else None), accelerator.autocast():
+                pipe = get_pipeline(
+                    text_encoder_architecture=args.text_encoder_architecture,
+                    transformer=validation_model, tokenizer=tokenizer, text_encoder=text_encoder,
+                    vq_model=vq_model, scheduler=type(scheduler).from_config(scheduler.config),
+                )
+                if args.train_edit_model:
+                    report = run_inter_edit_validation(
+                        pipe, validation_cases, validation_output_dir, step,
+                        num_inference_steps=args.validation_num_inference_steps,
+                        guidance_scale=args.validation_guidance_scale,
+                        reference_strength=args.validation_reference_strength,
+                        seed=args.validation_seed, edit_only_diffusion=args.edit_only_diffusion,
+                        sparse_target=args.sparse_target, sparse_target_halo=args.sparse_target_halo,
+                        negative_prompt=negative_prompt, use_ema=args.use_ema,
+                        use_reference_kv_cache=not args.validation_disable_reference_kv_cache,
+                        reference_kv_cache_threshold=args.validation_reference_kv_cache_threshold,
+                    )
+                    if wandb is not None and wandb.run is not None:
+                        wandb.log({
+                            "validation/inter_edit": [wandb.Image(panel, caption=caption)
+                                                      for panel, caption in zip(report["panels"], report["captions"])],
+                            "validation/contact_sheet": wandb.Image(report["contact_sheet"]),
+                            "validation/seconds": report["seconds"],
+                        }, step=step)
+                    logger.info("Saved Inter-Edit validation to %s (%.1fs)", report["step_dir"], report["seconds"])
+                else:
+                    prompts = args.validation_prompts or ["A scenic mountain landscape."]
+                    pipe.set_progress_bar_config(disable=True)
+                    images = pipe(
+                        prompt=prompts, height=args.resolution, width=args.resolution,
+                        negative_prompt=[negative_prompt] * len(prompts),
+                        guidance_scale=args.validation_guidance_scale,
+                        num_inference_steps=args.validation_num_inference_steps,
+                        generator=torch.Generator(device=accelerator.device).manual_seed(args.validation_seed),
+                    ).images
+                    step_dir = validation_output_dir / f"step_{step:06d}"
+                    step_dir.mkdir(parents=True, exist_ok=True)
+                    for index, image in enumerate(images):
+                        image.save(step_dir / f"generated_{index:03d}.png")
+                    if wandb is not None and wandb.run is not None:
+                        wandb.log({"validation/generated_images": [wandb.Image(image, caption=prompt)
+                                  for image, prompt in zip(images, prompts)]}, step=step)
+        finally:
+            del pipe
+            if accelerator.device.type == "cuda":
+                torch.cuda.empty_cache()
+
+    def visualize_training_step(step):
+        nonlocal last_validation_step
+        if args.validation_steps > 0 and step != last_validation_step:
+            synchronized_main_process_call(
+                accelerator, lambda: generate_validation(step),
+                description=f"Training visualization at optimizer step {step}",
+            )
+            last_validation_step = step
+
+    if args.validation_at_start:
+        visualize_training_step(global_step)
     
     # As stated above, we are not doing epoch based training here, but just using this for book keeping and being able to
     # reuse the same training loop with other datasets/loaders.
@@ -649,17 +952,63 @@ def main(args):
 
                 batch_size, seq_len = image_tokens.shape
 
+                # The reference branch remains unchanged, but its clean source tokens
+                # are also used to construct preserve regions in edit-only mode.
+                if args.train_edit_model:
+                    reference_values = batch["reference_image"].to(accelerator.device, non_blocking=True)
+                    source_tokens = prepare_cond_token(
+                        split_vae_encode=args.split_vae_encode,
+                        pixel_values=reference_values,
+                        vq_model=vq_model,
+                    )
+
                 timesteps = torch.rand(batch_size, device=image_tokens.device)
                 mask_prob = torch.cos(timesteps * math.pi * 0.5)
                 mask_prob = mask_prob.clip(args.min_masking_rate)
 
-                num_token_masked = (seq_len * mask_prob).round().clamp(min=1)
-                batch_randperm = torch.rand(batch_size, seq_len, device=image_tokens.device).argsort(dim=-1)
-                mask = batch_randperm < num_token_masked.unsqueeze(-1)
-
                 mask_id = accelerator.unwrap_model(model).config.vocab_size - 1
-                input_ids = torch.where(mask, mask_id, image_tokens)
-                labels = torch.where(mask, image_tokens, -100)
+                batch_randperm = torch.rand(batch_size, seq_len, device=image_tokens.device).argsort(dim=-1)
+
+                if args.edit_only_diffusion:
+                    token_side = int(math.isqrt(seq_len))
+                    if token_side * token_side != seq_len:
+                        raise ValueError(f"Expected a square VQ token grid, got {seq_len} tokens")
+                    token_edit_mask = resize_edit_mask_to_tokens(
+                        batch["edit_mask"].to(image_tokens.device, non_blocking=True),
+                        (token_side, token_side),
+                    )
+                    edit_token_count = token_edit_mask.sum(dim=-1)
+                    if (edit_token_count == 0).any():
+                        raise ValueError("Encountered an empty edit mask after token-grid resizing")
+
+                    input_ids, labels, corruption_mask, loss_mask = prepare_edit_only_corruption(
+                        target_tokens=image_tokens,
+                        source_tokens=source_tokens,
+                        token_edit_mask=token_edit_mask,
+                        mask_probability=mask_prob,
+                        mask_token_id=mask_id,
+                    )
+                    preserve_supervised_count = (loss_mask & ~token_edit_mask).sum()
+                    assert preserve_supervised_count.item() == 0
+
+                    edit_token_ratio = token_edit_mask.float().mean()
+                    corrupted_edit_token_ratio = (
+                        corruption_mask.sum() / edit_token_count.sum().clamp(min=1)
+                    )
+                    supervised_token_count = loss_mask.sum()
+
+                    if args.mask_debug_dir and accelerator.is_main_process and not mask_debug_saved:
+                        save_mask_debug_visualization(
+                            reference_values[0], batch["edit_mask"][0], token_edit_mask[0],
+                            (token_side, token_side),
+                            os.path.join(args.mask_debug_dir, "mask_alignment.png"),
+                        )
+                        mask_debug_saved = True
+                else:
+                    num_token_masked = (seq_len * mask_prob).round().clamp(min=1)
+                    mask = batch_randperm < num_token_masked.unsqueeze(-1)
+                    input_ids = torch.where(mask, mask_id, image_tokens)
+                    labels = torch.where(mask, image_tokens, -100)
 
                 with torch.no_grad():
                     batch["prompt_input_ids"] = move_batch_prompt_device(prompts=batch["prompt_input_ids"], device=accelerator.device, 
@@ -693,9 +1042,7 @@ def main(args):
 
                 # --- edit
                 if args.train_edit_model:
-                    reference_values = batch["reference_image"].to(accelerator.device, non_blocking=True)
-                    reference_image_hidden_states = prepare_cond_token(split_vae_encode=args.split_vae_encode, pixel_values=reference_values, vq_model=vq_model)
-                    reference_image_hidden_states = reference_image_hidden_states.reshape(bs, resolution, resolution)
+                    reference_image_hidden_states = source_tokens.reshape(bs, resolution, resolution)
                 # ----
 
             with torch.no_grad():
@@ -709,7 +1056,8 @@ def main(args):
             with accelerator.accumulate(model):
                 codebook_size = accelerator.unwrap_model(model).config.codebook_size
                 img_ids = _prepare_latent_image_ids(input_ids.shape[-2], input_ids.shape[-1],
-                                                    input_ids.device, input_ids.dtype, up_sample=args.resolution!=1024) # torch.Size([1024, 3])
+                                                    input_ids.device, input_ids.dtype,
+                                                    up_sample=accelerator.unwrap_model(model).down_block.downsample is None)
 
                 if not isinstance(text_encoder, list):
                     txt_ids = torch.zeros(encoder_hidden_states.shape[1], 3).to(device = input_ids.device, dtype = input_ids.dtype)
@@ -721,7 +1069,7 @@ def main(args):
                                                         reference_image_hidden_states.shape[-1],
                                                         reference_image_hidden_states.device,
                                                         reference_image_hidden_states.dtype,
-                                                        up_sample= args.resolution!=1024)
+                                                        up_sample=accelerator.unwrap_model(model).down_block.downsample is None)
 
                 logits = (
                     model(
@@ -732,6 +1080,8 @@ def main(args):
                         img_ids = img_ids,
                         txt_ids = txt_ids,
                         timestep = mask_prob * 1000,
+                        sparse_target=args.sparse_target,
+                        target_edit_mask=token_edit_mask if args.sparse_target else None,
                         # ----- edit
                         **({
                             'reference_image_hidden_states': reference_image_hidden_states,
@@ -776,74 +1126,31 @@ def main(args):
                         "lr": lr_scheduler.get_last_lr()[0],
                         "avg_masking_rate": avg_masking_rate.item(),
                     }
+                    if args.edit_only_diffusion:
+                        logs.update({
+                            "edit_token_ratio": edit_token_ratio.item(),
+                            "corrupted_edit_token_ratio": corrupted_edit_token_ratio.item(),
+                            "supervised_token_count": supervised_token_count.item(),
+                            "preserve_supervised_token_count": preserve_supervised_count.item(),
+                        })
                     accelerator.log(logs, step=global_step + 1)
 
                     logger.info(
                         f"Step: {global_step + 1} "
                         f"Loss: {avg_loss.item():0.4f} "
                         f"LR: {lr_scheduler.get_last_lr()[0]:0.6f}"
+                        + (f" Edit ratio: {edit_token_ratio.item():0.4f} "
+                           f"Corrupted edit ratio: {corrupted_edit_token_ratio.item():0.4f} "
+                           f"Supervised: {supervised_token_count.item()} "
+                           f"Preserve supervised: {preserve_supervised_count.item()}"
+                           if args.edit_only_diffusion else "")
                     )
 
                 if (global_step + 1) % args.checkpointing_steps == 0:
                     save_checkpoint(args, accelerator, global_step + 1, logger)
 
-                if (global_step + 1) % args.validation_steps == 0 and accelerator.is_main_process:
-                    if args.use_ema:
-                        ema.store(model.parameters())
-                        ema.copy_to(model.parameters())
-
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-                    with torch.no_grad():
-                        logger.info("Generating images...")
-
-                        model.eval()
-                        pipe = get_pipeline(text_encoder_architecture=args.text_encoder_architecture,
-                                            transformer=accelerator.unwrap_model(model),
-                                            tokenizer=tokenizer,
-                                            text_encoder=text_encoder,
-                                            vq_model=vq_model,
-                                            scheduler=scheduler,
-                                        )
-                        if args.train_edit_model:
-                            validation_prompts = ['A woman with short hair wears a silver gas mask.', 
-                                                  'wear a sunglasses on the dog', 
-                                                  "A woman wearing a white suspender skirt is sitting"]
-                            validation_images = ['_Rh_zxIUWXA.jpg', '0eKR4M2uuL8.jpg', '__Owak0IgJk.jpg']
-                            pil_images = pipe(prompt=validation_prompts,
-                                negative_prompt=[negative_prompt] * len(validation_prompts),
-                                height=args.resolution, 
-                                width=args.resolution,
-                                reference_image=[Image.open(f'assets/inpaint/{img}') for img in validation_images],
-                                reference_strength=1,
-                                guidance_scale=9, num_inference_steps=32).images
-                        else:
-                            validation_prompts = args.validation_prompts
-                            pil_images = pipe(prompt=validation_prompts,
-                                height=args.resolution,
-                                width=args.resolution,
-                                guidance_scale=9,
-                                num_inference_steps=32).images
-                            
-                        result=[]
-                        for img in pil_images:
-                            if not isinstance(img, torch.Tensor):
-                                img = transforms.ToTensor()(img)
-                            result.append(img.unsqueeze(0))
-                        result = torch.cat(result,dim=0)
-                        result = make_grid(result, nrow=3)
-                        # save_image(result,os.path.join(args.output_dir,str(global_step)+'_text2image_512_CFG-9.png'))
-
-                        wandb_images = [
-                            wandb.Image(image, caption=validation_prompts[i])
-                            for i, image in enumerate(pil_images)
-                        ]
-                        wandb.log({"generated_images": wandb_images}, step=global_step + 1)
-
-                        model.train()
-
-                    if args.use_ema:
-                        ema.restore(model.parameters())
+                if args.validation_steps > 0 and (global_step + 1) % args.validation_steps == 0:
+                    visualize_training_step(global_step + 1)
 
                 global_step += 1
 
@@ -856,6 +1163,8 @@ def main(args):
                 torch.cuda.synchronize()
         # End for
 
+    # Also save the last trained state when the run ends between intervals.
+    visualize_training_step(global_step)
     accelerator.wait_for_everyone()
 
     # Evaluate and save checkpoint at the end of training
@@ -863,10 +1172,13 @@ def main(args):
 
     # Save the final trained checkpoint
     if accelerator.is_main_process:
-        model = accelerator.unwrap_model(model)
+        model = unwrap_training_model(model)
         if args.use_ema:
             ema.copy_to(model.parameters())
-        model.save_pretrained(args.output_dir)
+        if args.use_lora:
+            save_model_hook([model], [None], args.output_dir)
+        else:
+            model.save_pretrained(args.output_dir)
 
     accelerator.end_training()
 

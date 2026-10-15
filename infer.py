@@ -16,7 +16,7 @@ if __name__ == "__main__":
     # pipe.local_guidance=0.01 # After starting, it will use the local GS auxiliary mode.
     # pipe.local_query_text = 'owl' # Use specific words as attention queries
     # pipe.attention_enable_blocks = [i for i in range(28, 37)]  # attention layer used
-    input_image = Image.open('assets/case_5.jspg')
+    input_image = Image.open('assets/case_5.jpg')
     result = pipe(
         prompt=['Make it into Ghibli style'],
         height=1024,
@@ -25,9 +25,11 @@ if __name__ == "__main__":
         guidance_scale=6,
         reference_strength=1.1,
         reference_image=[input_image.resize((1024, 1024))],
+        use_reference_kv_cache=True,
+        reference_kv_cache_threshold=0.3,
         negative_prompt=negative_prompt or None,
     )
-    output_dir = "./output"
+    output_dir = "./outputs"
     os.makedirs(output_dir, exist_ok=True)
 
     file_path = os.path.join(output_dir, f"edited_case_5.png")

@@ -212,6 +212,17 @@ class PerceiverResampler(nn.Module):
 
         return latents
 
+def apply_branch_rotary_emb(hidden_states, rotary_emb):
+    """Apply shared [N,D] or per-sample [B,N,D] real Flux RoPE."""
+    cos, sin = rotary_emb
+    if cos.ndim == 2:
+        return apply_rotary_emb(hidden_states, rotary_emb)
+    cos, sin = cos[:, None].to(hidden_states.device), sin[:, None].to(hidden_states.device)
+    real, imag = hidden_states.reshape(*hidden_states.shape[:-1], -1, 2).unbind(-1)
+    rotated = torch.stack((-imag, real), dim=-1).flatten(-2)
+    return (hidden_states.float() * cos + rotated.float() * sin).to(hidden_states.dtype)
+
+
 class ConFluxAttnProcessor2_0:
     # Modified from diffusers.models.attention_processor import FluxAttnProcessor2_0
     def __init__(self):
@@ -222,6 +233,9 @@ class ConFluxAttnProcessor2_0:
         self.capture_attention = False
         self.text_seq_len = 256
         self.block_id = None
+        self.target_token_indices = None
+        self.target_token_valid = None
+        self.target_grid_size = None
 
     def __call__(
         self,
@@ -234,6 +248,8 @@ class ConFluxAttnProcessor2_0:
         reference_image_hidden_states: Optional[torch.Tensor] = None,
         reference_image_rotary_emb: Optional[torch.Tensor] = None,
         lora_part_enable: bool = False,
+        reference_kv_cache=None,
+        reference_cache_key: Optional[str] = None,
     ) -> torch.FloatTensor:
         batch_size, _, _ = hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
 
@@ -293,9 +309,12 @@ class ConFluxAttnProcessor2_0:
         if image_rotary_emb is not None:
             # cprint(f'{query.shape} {image_rotary_emb[0].shape, image_rotary_emb[1].shape}', 'red')
             # torch.Size([2, 8, 1280, 128]) (torch.Size([1280, 128]), torch.Size([1280, 128]))
-            query = apply_rotary_emb(query, image_rotary_emb)
-            key = apply_rotary_emb(key, image_rotary_emb)
+            query = apply_branch_rotary_emb(query, image_rotary_emb)
+            key = apply_branch_rotary_emb(key, image_rotary_emb)
 
+        main_query_length = query.shape[2]
+        main_key_length = key.shape[2]
+        reference_query, reference_key, reference_value = None, None, None
         if reference_image_hidden_states is not None:
             reference_query = attn.to_q(reference_image_hidden_states)
             reference_key = attn.to_k(reference_image_hidden_states)
@@ -310,80 +329,94 @@ class ConFluxAttnProcessor2_0:
                 reference_key = attn.norm_k(reference_key)
 
             if reference_image_rotary_emb is not None:
-                reference_query = apply_rotary_emb(reference_query, reference_image_rotary_emb)
-                reference_key = apply_rotary_emb(reference_key, reference_image_rotary_emb)
-                
-            # Only here is there an intersection. If set to None, it will have no effect on the result.
+                reference_query = apply_branch_rotary_emb(reference_query, reference_image_rotary_emb)
+                reference_key = apply_branch_rotary_emb(reference_key, reference_image_rotary_emb)
+
+            if reference_kv_cache is not None:
+                # Store only the complete reference K/V, already normalized and
+                # rotated with type=1 and original reference spatial coordinates.
+                reference_kv_cache.store(reference_cache_key, reference_key, reference_value)
             query = torch.cat([query, reference_query], dim=2)
+        elif reference_kv_cache is not None:
+            # Cache-only inference has text/target queries and full reference
+            # keys/values. Reference has no queries, projections or MLP updates.
+            reference_key, reference_value = reference_kv_cache.get(reference_cache_key, query)
+
+        reference_length = 0 if reference_key is None else reference_key.shape[2]
+        if reference_key is not None:
             key = torch.cat([key, reference_key], dim=2)
             value = torch.cat([value, reference_value], dim=2)
         
             if hasattr(attn, "reference_strength_factor"):  # to control the strength of raw image
-                attention_mask = torch.zeros(
-                    query.shape[2], key.shape[2], device=query.device, dtype=query.dtype
-                )
-                reference_n = reference_query.shape[2]
-                bias = torch.log(attn.reference_strength_factor[0])
-                attention_mask[-reference_n:, :-reference_n] = bias
-                attention_mask[:-reference_n, -reference_n:] = bias
-        else:
-            reference_query, reference_key = None, None
+                bias = torch.log(attn.reference_strength_factor[0].to(device=query.device, dtype=query.dtype))
+                if reference_query is not None:
+                    reference_bias = torch.zeros(
+                        query.shape[2], key.shape[2], device=query.device, dtype=query.dtype
+                    )
+                    reference_bias[:main_query_length, main_key_length:] = bias
+                    reference_bias[main_query_length:, :main_key_length] = bias
+                else:
+                    # Without reference queries, strength is a per-key bias.
+                    # Broadcast it instead of allocating a Q x K matrix.
+                    reference_bias = torch.zeros(1, 1, 1, key.shape[2], device=query.device, dtype=query.dtype)
+                    reference_bias[..., main_key_length:] = bias
+                attention_mask = reference_bias if attention_mask is None else attention_mask + reference_bias
 
         # ------------- visualize attention weights
         if self.capture_attention:
+            capture_attention_mask = attention_mask
             if reference_query is not None and reference_key is not None:
                 capture_query = query[:, :, :-reference_query.shape[2]]
-                capture_key = key[:, :, :-reference_key.shape[2]]
-                if hasattr(attn, "reference_strength_factor"):  # to control the strength of raw image
-                    capture_seq_len = capture_query.shape[2]  # 1280
-                    capture_attention_mask = attention_mask[:capture_seq_len, :capture_seq_len]
+                # Keep all keys so the extracted weights use exactly the same
+                # softmax denominator as the model (text + generation + reference).
+                capture_key = key
             else:
                 capture_query = query
                 capture_key = key
 
-            if hasattr(attn, "reference_strength_factor") and capture_attention_mask is not None:
-                # torch.Size([1280, 1280]) -> torch.Size([bs, head, 1280, 1280]) the same with 
-                capture_attention_mask = capture_attention_mask.unsqueeze(0).unsqueeze(0)
-                capture_attention_mask = capture_attention_mask.expand(capture_query.shape[0], capture_query.shape[1], -1, -1)
+            if capture_attention_mask is not None:
+                if capture_attention_mask.dtype == torch.bool:
+                    capture_attention_mask = torch.zeros_like(capture_attention_mask, dtype=query.dtype).masked_fill(
+                        ~capture_attention_mask, float("-inf")
+                    )
+                capture_attention_mask = capture_attention_mask[..., :capture_query.shape[2], :]
  
             scale = 1.0 / (head_dim ** 0.5)
-            attention_scores = torch.matmul(capture_query, capture_key.transpose(-2, -1)) * scale
-            if hasattr(attn, "reference_strength_factor") and capture_attention_mask is not None:
-                attention_scores = attention_scores + capture_attention_mask
-            
-            attention_probs = F.softmax(attention_scores, dim=-1)
-            text_to_image = attention_probs[:, :, :text_len, text_len:]
-            image_to_text = attention_probs[:, :, text_len:, :text_len]
-            image_to_image = attention_probs[:, :, text_len:, text_len:]
-            text_to_text = attention_probs[:, :, :text_len, :text_len]
+            # Analysis only needs the two cross-modal directions. Computing
+            # query-row slices avoids materializing/storing the full NxN matrix.
+            text_scores = torch.matmul(
+                capture_query[:, :, :text_len], capture_key.transpose(-2, -1)
+            ) * scale
+            image_scores = torch.matmul(
+                capture_query[:, :, text_len:], capture_key.transpose(-2, -1)
+            ) * scale
+            if capture_attention_mask is not None:
+                text_scores = text_scores + capture_attention_mask[..., :text_len, :]
+                image_mask = capture_attention_mask if capture_attention_mask.shape[-2] == 1 else capture_attention_mask[..., text_len:, :]
+                image_scores = image_scores + image_mask
+            text_probabilities = F.softmax(text_scores, dim=-1)
+            text_to_image = text_probabilities[:, :, :, text_len:text_len + image_len]
+            image_to_text = F.softmax(image_scores, dim=-1)[:, :, :, :text_len]
 
-            # reference attention, if the text emb is not included, it will be meaningless
-            if reference_query is not None and reference_key is not None:
-                if encoder_hidden_states is not None:
-                    ref_cap_query = torch.cat([query[:, :, :encoder_hidden_states.shape[2]], query[:, :, -reference_query.shape[2]:]], dim=2)
-                    ref_cap_key = torch.cat([key[:, :, :encoder_hidden_states.shape[2]], key[:, :, -reference_query.shape[2]:]], dim=2)
-                else:
-                    ref_cap_query = query[:, :, :-reference_query.shape[2]]
-                    ref_cap_key = key[:, :, :-reference_key.shape[2]]
-                ref_cap_scores = torch.matmul(ref_cap_query, ref_cap_key.transpose(-2, -1)) * scale
-                if hasattr(attn, "reference_strength_factor") and capture_attention_mask is not None:
-                    ref_cap_scores = ref_cap_scores + capture_attention_mask
-                ref_cap_probs = F.softmax(ref_cap_scores, dim=-1)
-                ref_cap_text_to_image = ref_cap_probs[:, :, :text_len, text_len:]
+            if reference_length:
+                ref_cap_text_to_image = text_probabilities[:, :, :, text_len + image_len:]
 
             self.attention_weights = {
                 'text_to_image': text_to_image.detach().cpu(),
                 'image_to_text': image_to_text.detach().cpu(),
-                'image_to_image':  image_to_image.detach().cpu(),
-                'text_to_text':  text_to_text.detach().cpu(),
-                'full_attention': attention_probs.detach().cpu(),
                 'reference_text_to_image': ref_cap_text_to_image.detach().cpu() \
-                                if reference_query is not None and reference_key is not None else None,
+                                if reference_length else None,
                 'text_len': text_len,
                 'image_len': image_len,
+                'reference_len': reference_length,
                 'block_type': 'double' if encoder_hidden_states is not None else 'single',
                 'block_id': self.block_id
             }
+            self.attention_weights.update({
+                'target_token_indices': self.target_token_indices.detach().cpu() if self.target_token_indices is not None else None,
+                'target_token_valid': self.target_token_valid.detach().cpu() if self.target_token_valid is not None else None,
+                'target_grid_size': self.target_grid_size,
+            })
         # ------------- 
 
         hidden_states = F.scaled_dot_product_attention(

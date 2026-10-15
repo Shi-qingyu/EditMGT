@@ -1,0 +1,27 @@
+[
+  {
+    "id": "case_1_dog_hat",
+    "image": "assets/case_1.png",
+    "instruction": "Place a blue party hat on the dog."
+  },
+  {
+    "id": "case_2_red_mug",
+    "image": "assets/case_2.png",
+    "instruction": "Make the coffee mug bright red."
+  },
+  {
+    "id": "case_3_red_airplane",
+    "image": "assets/case_3.png",
+    "instruction": "Turn the airplane bright red."
+  },
+  {
+    "id": "case_4_red_lighthouse",
+    "image": "assets/case_4.png",
+    "instruction": "Paint the lighthouse bright red."
+  },
+  {
+    "id": "case_5_blue_eyes",
+    "image": "assets/case_5.jpg",
+    "instruction": "Make the owl's eyes bright blue."
+  }
+]

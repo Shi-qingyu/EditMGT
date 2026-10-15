@@ -25,8 +25,11 @@ from diffusers.models.resnet import Downsample2D, Upsample2D
 from diffusers.models.normalization import RMSNorm
 from diffusers.models.embeddings import TimestepEmbedding, get_timestep_embedding
 from peft import LoraConfig
+from peft.utils import set_peft_model_state_dict
 from src.v2_utils import MLPProjector, LinearProjector, FusedMLPProjector, PerceiverResampler, ConFluxAttnProcessor2_0, enable_lora
 from src.dataset_utils import get_encode_hidden_state_len
+from src.sparse_utils import prepare_sparse_target_layout, prepare_branch_ids, batched_rotary_embedding
+from src.reference_cache import ReferenceKVCache
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -46,21 +49,30 @@ def get_text_encoder_length(text_encoder_architecture, return_main=False):
         raise ValueError(f"Unknown text encoder architecture: {text_encoder_architecture}")
 
 def setup_lora_model(transformer, local_lora_dir):        
+    transformer = getattr(transformer, "_orig_mod", transformer)
+    sparse_config_path = os.path.join(local_lora_dir, "sparse_target_config.json")
+    if os.path.isfile(sparse_config_path):
+        with open(sparse_config_path) as f:
+            transformer.enable_sparse_target(halo=json.load(f)["sparse_target_halo"])
     config_path = os.path.join(local_lora_dir, "lora_config.json")
     with open(config_path, 'r') as f:
         config_dict = json.load(f)
     if 'target_modules' in config_dict and isinstance(config_dict['target_modules'], list):
         config_dict['target_modules'] = config_dict['target_modules']
     lora_config = LoraConfig(**config_dict)
-    transformer.add_adapter(lora_config)
+    if "default" not in getattr(transformer, "peft_config", {}):
+        transformer.add_adapter(lora_config)
 
 def load_lora_adapter(transformer, local_lora_dir, print_para_name=False):
     """Load pre-trained LoRA weights"""
     setup_lora_model(transformer, local_lora_dir)
     lora_state_dict, network_alphas = LoraLoaderMixin.lora_state_dict(local_lora_dir)
-    new_lora_state_dict = {k.replace("unet._orig_mod.", "").replace('.weight', '.default.weight'): v for k, v in lora_state_dict.items()}
-    new_lora_state_dict = {k: v.to(dtype=transformer.dtype, device=transformer.device) 
-                        for k, v in new_lora_state_dict.items()}
+    target_model = getattr(transformer, "_orig_mod", transformer)
+    new_lora_state_dict = {
+        k.removeprefix("unet.").removeprefix("_orig_mod."): v.to(dtype=transformer.dtype, device=transformer.device)
+        for k, v in lora_state_dict.items()
+    }
+    set_peft_model_state_dict(target_model, new_lora_state_dict, adapter_name="default")
     return transformer
 
 @maybe_allow_in_graph
@@ -98,6 +110,9 @@ class SingleTransformerBlock(nn.Module):
         reference_temb=None,
         reference_image_rotary_emb=None,
         lora_part_enable: Optional[bool] = False,
+        attention_mask: Optional[torch.Tensor] = None,
+        reference_kv_cache: Optional[ReferenceKVCache] = None,
+        reference_cache_key: Optional[str] = None,
     ):
         residual = hidden_states  # torch.Size([2, 1280, 1024]) for either 1024 or 512
         with enable_lora((self.norm.linear, self.proj_mlp), not lora_part_enable):
@@ -114,11 +129,18 @@ class SingleTransformerBlock(nn.Module):
                 reference_image_hidden_states=reference_norm_hidden_states if reference_image_hidden_states is not None else None,
                 reference_image_rotary_emb=reference_image_rotary_emb if reference_image_hidden_states is not None else None,
                 lora_part_enable=lora_part_enable,
+                attention_mask=attention_mask,
+                reference_kv_cache=reference_kv_cache,
+                reference_cache_key=reference_cache_key,
             )
         else:
             attn_output = self.attn(
                 hidden_states=norm_hidden_states,
                 image_rotary_emb=image_rotary_emb,
+                attention_mask=attention_mask,
+                lora_part_enable=lora_part_enable,
+                reference_kv_cache=reference_kv_cache,
+                reference_cache_key=reference_cache_key,
             )
 
         with enable_lora((self.proj_out,), not lora_part_enable):
@@ -191,6 +213,9 @@ class TransformerBlock(nn.Module):
         reference_temb=None,
         reference_image_rotary_emb=None, 
         lora_part_enable: Optional[bool] = False,
+        attention_mask: Optional[torch.Tensor] = None,
+        reference_kv_cache: Optional[ReferenceKVCache] = None,
+        reference_cache_key: Optional[str] = None,
     ):
         with enable_lora((self.norm1.linear,), not lora_part_enable):
             norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
@@ -211,12 +236,19 @@ class TransformerBlock(nn.Module):
                 reference_image_hidden_states=reference_norm_hidden_states,
                 reference_image_rotary_emb=reference_image_rotary_emb,
                 lora_part_enable=lora_part_enable,
+                attention_mask=attention_mask,
+                reference_kv_cache=reference_kv_cache,
+                reference_cache_key=reference_cache_key,
             )
         else:
             attn_output, context_attn_output = self.attn(
                 hidden_states=norm_hidden_states,
                 encoder_hidden_states=norm_encoder_hidden_states,
                 image_rotary_emb=image_rotary_emb,
+                attention_mask=attention_mask,
+                lora_part_enable=lora_part_enable,
+                reference_kv_cache=reference_kv_cache,
+                reference_cache_key=reference_cache_key,
             )
 
         # Process attention outputs for the `hidden_states`.
@@ -387,9 +419,8 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         guidance_embeds (`bool`, defaults to False): Whether to use guidance embeddings.
     """
 
-    _supports_gradient_checkpointing = False
-    # Due to NotImplementedError: DDPOptimizer backend: Found a higher order op in the graph. This is not supported. Please turn off DDP optimizer using torch._dynamo.config.optimize_ddp=False. Note that this can cause performance degradation because there will be one bucket for the entire Dynamo graph. 
-    # Please refer to this issue - https://github.com/pytorch/pytorch/issues/104674.
+    _supports_gradient_checkpointing = True
+    # Compiled checkpointed DDP training disables optimize_ddp in train/train.py.
     _no_split_modules = ["TransformerBlock", "SingleTransformerBlock"]
 
     @register_to_config
@@ -410,7 +441,10 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         downsample: bool = False,
         upsample: bool = False,
         text_encoder_architecture: str = "CLIP",
-        connector_type: str = 'none'   # None will not be save
+        connector_type: str = 'none',   # None will not be save
+        sparse_target: bool = False,
+        sparse_target_halo: int = 1,
+        token_type_rope: bool = False,
     ):
         super().__init__()
         self.out_channels = in_channels
@@ -462,6 +496,11 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         self.cond_embed = TimestepEmbedding( #1024+1280=2304 -> 1024
             micro_cond_embed_dim + self.config.pooled_projection_dim, self.inner_dim, sample_proj_bias=use_bias
         )
+        # Keep the pretrained five-value micro-conditioning projection intact.
+        # The two extra sinusoidal (h,w) encodings enter through a residual MLP.
+        self.sparse_shape_embed = None
+        if sparse_target:
+            self._init_sparse_shape_embed()
         self.encoder_proj_layer_norm = RMSNorm(self.inner_dim, layer_norm_eps, ln_elementwise_affine)
 
         self.project_to_hidden_norm = RMSNorm(in_channels_embed, layer_norm_eps, ln_elementwise_affine)
@@ -509,6 +548,28 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         
         self.text_seq_len = get_encode_hidden_state_len(self.text_encoder_architecture)
         self.capture_processors = {}
+
+    def _init_sparse_shape_embed(self):
+        self.sparse_shape_embed = TimestepEmbedding(2 * 256, self.inner_dim, sample_proj_bias=False)
+        nn.init.zeros_(self.sparse_shape_embed.linear_2.weight)
+
+    def enable_sparse_target(self, halo: Optional[int] = None):
+        """Upgrade a loaded dense checkpoint before creating the optimizer/LoRA."""
+        halo = self.config.sparse_target_halo if halo is None else halo
+        if not isinstance(halo, int) or halo < 0:
+            raise ValueError("sparse_target_halo must be a non-negative integer")
+        if self.sparse_shape_embed is None:
+            self._init_sparse_shape_embed()
+            self.sparse_shape_embed.to(device=self.device, dtype=self.dtype)
+        self.register_to_config(sparse_target=True, sparse_target_halo=halo, token_type_rope=True)
+
+    def add_adapter(self, adapter_config, adapter_name: str = "default"):
+        super().add_adapter(adapter_config, adapter_name=adapter_name)
+        # Diffusers 0.32's adapter selection freezes non-LoRA parameters, including
+        # PEFT modules_to_save. Explicitly keep the new conditioning MLP trainable.
+        saved_modules = getattr(self.sparse_shape_embed, "modules_to_save", {})
+        if adapter_name in saved_modules:
+            saved_modules[adapter_name].requires_grad_(True)
 
     def register_attention_hooks(self, target_blocks):
         """Replace the attention processor for all target blocks"""
@@ -658,6 +719,10 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         reference_image_ids: torch.Tensor = None,
         reference_image_timestep: int=0,
         lora_part_enable: Optional[bool] = False,
+        target_edit_mask: Optional[torch.Tensor] = None,
+        sparse_target: Optional[bool] = None,
+        sparse_target_halo: Optional[int] = None,
+        reference_kv_cache: Optional[ReferenceKVCache] = None,
     ) -> Union[torch.FloatTensor, Transformer2DModelOutput]:
         """
         The [`FluxTransformer2DModel`] forward method.
@@ -671,6 +736,18 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                 from the embeddings of input conditions.
             timestep ( `torch.LongTensor`):
                 Used to indicate denoising step.
+            target_edit_mask (`torch.Tensor`, *optional*):
+                Boolean edit mask on the input VQ grid. In sparse mode, active target tokens
+                (edit region plus halo) are gathered once after the stem, keep their original
+                2D RoPE coordinates through every block, and are scattered once at the end.
+            sparse_target (`bool`, *optional*):
+                Override the checkpoint's sparse mode; False runs the full target sequence.
+            sparse_target_halo (`int`, *optional*):
+                Halo radius in Transformer-grid tokens, after downsampling.
+            reference_kv_cache (`ReferenceKVCache`, *optional*):
+                In eval/no-grad mode, a fresh cache plus reference input captures
+                full per-layer reference K/V. A ready cache with no reference
+                input reuses these K/V and skips the reference branch entirely.
             block_controlnet_hidden_states: (`list` of `torch.Tensor`):
                 A list of tensors that if specified are added to the residuals of transformer blocks.
             joint_attention_kwargs (`dict`, *optional*):
@@ -685,6 +762,22 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
             `tuple` where the first element is the sample tensor.
         """
+        sparse_target = self.config.sparse_target if sparse_target is None else sparse_target
+        cached_reference = reference_kv_cache is not None and reference_kv_cache.ready
+        if reference_kv_cache is not None:
+            if self.training or torch.is_grad_enabled():
+                raise ValueError("Reference KV caching requires model.eval() and no-grad inference")
+            if cached_reference and reference_image_hidden_states is not None:
+                raise ValueError("Omit reference_image_hidden_states when reusing a frozen reference cache")
+            if not cached_reference and reference_image_hidden_states is None:
+                raise ValueError("An empty reference cache requires the full reference input for capture")
+        if sparse_target and (target_edit_mask is None or (
+            reference_image_hidden_states is None and not cached_reference
+        )):
+            raise ValueError("Sparse target requires target_edit_mask and a full reference branch or KV cache")
+        if sparse_target and self.sparse_shape_embed is None:
+            raise ValueError("Call enable_sparse_target() before sparse-target inference/training")
+        input_grid_size = tuple(hidden_states.shape[-2:])
         if self.connector_type is not None and self.connector_type != 'none':
             if self.connector_type == 'qformer':
                 timestep_emb = get_timestep_embedding(timestep.to(hidden_states.dtype) * 1000, self.inner_dim)
@@ -714,6 +807,26 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch_size, height * width, channels)
         hidden_states = self.project_to_hidden_norm(hidden_states) # norm first or proj first?
         hidden_states = self.project_to_hidden(hidden_states)
+
+        layout = None
+        full_target_hidden_states = None
+        if sparse_target:
+            layout = prepare_sparse_target_layout(
+                target_edit_mask, input_grid_size, (height, width), batch_size, hidden_states.device,
+                self.config.sparse_target_halo if sparse_target_halo is None else sparse_target_halo,
+            )
+            full_target_hidden_states = hidden_states
+            hidden_states = layout.gather(hidden_states)
+        if self.sparse_shape_embed is not None:
+            target_shape = layout.shape if layout is not None else hidden_states.new_tensor(
+                [height, width]
+            ).expand(batch_size, -1)
+            shape_embeds = get_timestep_embedding(
+                target_shape.flatten(), 256, flip_sin_to_cos=True, downscale_freq_shift=0
+            ).reshape(batch_size, 512)
+            pooled_projections = pooled_projections + self.sparse_shape_embed(
+                shape_embeds.to(dtype=self.dtype)
+            ).to(pooled_projections.dtype)
 
         if reference_image_hidden_states is not None:
             reference_image_hidden_states = self.embed(reference_image_hidden_states)
@@ -758,34 +871,47 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                 )
             )
 
-        if txt_ids.ndim == 3:
-            logger.warning(
-                "Passing `txt_ids` 3d torch.Tensor is deprecated."
-                "Please remove the batch dimension and pass it as a 2d torch Tensor"
+        type_rope = self.config.token_type_rope or self.config.sparse_target
+        txt_ids = prepare_branch_ids(txt_ids, batch_size, encoder_hidden_states.shape[1], 0 if type_rope else None)
+        img_ids = prepare_branch_ids(img_ids, batch_size, height * width, 2 if type_rope else None)
+        if layout is not None:
+            # Gather existing 2D IDs, never replace them with [0..N_active).
+            img_ids = layout.gather(img_ids)
+        image_rotary_emb = batched_rotary_embedding(self.pos_embed, torch.cat((txt_ids, img_ids), dim=1))
+        reference_image_rotary_emb = None
+        reference_length = reference_kv_cache.reference_length if cached_reference else 0
+        if reference_image_hidden_states is not None:
+            reference_length = reference_image_hidden_states.shape[1]
+            reference_image_ids = prepare_branch_ids(
+                reference_image_ids, batch_size, reference_length, 1 if type_rope else None
             )
-            txt_ids = txt_ids[0]
-        if img_ids.ndim == 3:
-            logger.warning(
-                "Passing `img_ids` 3d torch.Tensor is deprecated."
-                "Please remove the batch dimension and pass it as a 2d torch Tensor"
-            )
-            img_ids = img_ids[0]
+            reference_image_rotary_emb = batched_rotary_embedding(self.pos_embed, reference_image_ids)
 
-        ids = torch.cat((txt_ids, img_ids), dim=0)
-        image_rotary_emb = self.pos_embed(ids) # a tuple
-        
-        if reference_image_ids is not None and reference_image_hidden_states is not None:
-            reference_image_rotary_emb = self.pos_embed(reference_image_ids) 
+        attention_mask = None
+        if layout is not None:
+            key_valid = torch.cat((
+                torch.ones(batch_size, encoder_hidden_states.shape[1], device=hidden_states.device, dtype=torch.bool),
+                layout.valid,
+                torch.ones(batch_size, reference_length, device=hidden_states.device, dtype=torch.bool),
+            ), dim=1)
+            attention_mask = hidden_states.new_zeros(batch_size, 1, 1, key_valid.shape[1])
+            attention_mask.masked_fill_(~key_valid[:, None, None], float("-inf"))
+        for processor in self.attn_processors.values():
+            processor.text_seq_len = encoder_hidden_states.shape[1]
+            processor.target_token_indices = layout.indices if layout is not None else None
+            processor.target_token_valid = layout.valid if layout is not None else None
+            processor.target_grid_size = (height, width)
 
         for index_block, block in enumerate(self.transformer_blocks):
+            reference_cache_key = f"transformer_blocks.{index_block}"
             if self.training and self.gradient_checkpointing:
 
                 def create_custom_forward(module, return_dict=None):
-                    def custom_forward(*inputs):
+                    def custom_forward(*inputs, **kwargs):
                         if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict)
+                            return module(*inputs, return_dict=return_dict, **kwargs)
                         else:
-                            return module(*inputs)
+                            return module(*inputs, **kwargs)
 
                     return custom_forward
 
@@ -801,6 +927,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                         image_rotary_emb=image_rotary_emb,
                         reference_image_rotary_emb=reference_image_rotary_emb if reference_image_hidden_states is not None else None,
                         lora_part_enable=lora_part_enable,
+                        attention_mask=attention_mask,
                         **ckpt_kwargs,
                     )
                 else:
@@ -810,6 +937,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                         encoder_hidden_states,
                         temb,
                         image_rotary_emb,
+                        attention_mask=attention_mask,
                         **ckpt_kwargs,
                     )
 
@@ -824,6 +952,9 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                         image_rotary_emb=image_rotary_emb,
                         reference_image_rotary_emb=reference_image_rotary_emb if reference_image_hidden_states is not None else None,
                         lora_part_enable=lora_part_enable,
+                        attention_mask=attention_mask,
+                        reference_kv_cache=reference_kv_cache,
+                        reference_cache_key=reference_cache_key,
                     )
                 else:
                     encoder_hidden_states, hidden_states = block(
@@ -831,31 +962,40 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                         encoder_hidden_states=encoder_hidden_states,
                         temb=temb,  
                         image_rotary_emb=image_rotary_emb,
+                        attention_mask=attention_mask,
+                        lora_part_enable=lora_part_enable,
+                        reference_kv_cache=reference_kv_cache,
+                        reference_cache_key=reference_cache_key,
                     )
                 
             # controlnet residual
             if controlnet_block_samples is not None:
                 interval_control = len(self.transformer_blocks) / len(controlnet_block_samples)
                 interval_control = int(np.ceil(interval_control))
-                hidden_states = hidden_states + controlnet_block_samples[index_block // interval_control]
+                control_residual = controlnet_block_samples[index_block // interval_control]
+                if layout is not None:
+                    control_residual = layout.gather(control_residual)
+                hidden_states = hidden_states + control_residual
 
         hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
         for index_block, block in enumerate(self.single_transformer_blocks):
+            reference_cache_key = f"single_transformer_blocks.{index_block}"
             if self.training and self.gradient_checkpointing:
 
                 def create_custom_forward(module, return_dict=None):
-                    def custom_forward(*inputs):
+                    def custom_forward(*inputs, **kwargs):
                         if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict)
+                            return module(*inputs, return_dict=return_dict, **kwargs)
                         else:
-                            return module(*inputs)
+                            return module(*inputs, **kwargs)
 
                     return custom_forward
 
                 ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
                 if reference_image_hidden_states is not None:
                     hidden_states, reference_image_hidden_states = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(block),
                         hidden_states=hidden_states,
                         reference_image_hidden_states=reference_image_hidden_states if reference_image_hidden_states is not None else None,
                         temb=temb,
@@ -863,6 +1003,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                         image_rotary_emb=image_rotary_emb,
                         reference_image_rotary_emb=reference_image_rotary_emb if reference_image_hidden_states is not None else None,
                         lora_part_enable=lora_part_enable,
+                        attention_mask=attention_mask,
                         **ckpt_kwargs,
                     )
                 else:
@@ -871,6 +1012,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                         hidden_states,
                         temb,
                         image_rotary_emb,
+                        attention_mask=attention_mask,
                         **ckpt_kwargs,
                     )
             else:
@@ -883,24 +1025,43 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                         image_rotary_emb=image_rotary_emb,
                         reference_image_rotary_emb=reference_image_rotary_emb if reference_image_hidden_states is not None else None,
                         lora_part_enable=lora_part_enable,
+                        attention_mask=attention_mask,
+                        reference_kv_cache=reference_kv_cache,
+                        reference_cache_key=reference_cache_key,
                     )
                 else:
                     hidden_states = block(
                         hidden_states=hidden_states,
                         temb=temb,
                         image_rotary_emb=image_rotary_emb,
+                        attention_mask=attention_mask,
+                        lora_part_enable=lora_part_enable,
+                        reference_kv_cache=reference_kv_cache,
+                        reference_cache_key=reference_cache_key,
                     )
 
             # controlnet residual
             if controlnet_single_block_samples is not None: 
                 interval_control = len(self.single_transformer_blocks) / len(controlnet_single_block_samples)
                 interval_control = int(np.ceil(interval_control))
+                control_residual = controlnet_single_block_samples[index_block // interval_control][:, encoder_hidden_states.shape[1]:]
+                if layout is not None:
+                    control_residual = layout.gather(control_residual)
                 hidden_states[:, encoder_hidden_states.shape[1] :, ...] = (
                     hidden_states[:, encoder_hidden_states.shape[1] :, ...]
-                    + controlnet_single_block_samples[index_block // interval_control][:, encoder_hidden_states.shape[1] :, ...]
+                    + control_residual
                 )
 
+        if reference_kv_cache is not None and not cached_reference:
+            reference_kv_cache.freeze(
+                [f"transformer_blocks.{i}" for i in range(len(self.transformer_blocks))]
+                + [f"single_transformer_blocks.{i}" for i in range(len(self.single_transformer_blocks))]
+            )
+
         hidden_states = hidden_states[:, encoder_hidden_states.shape[1] :, ...] 
+
+        if layout is not None:
+            hidden_states = layout.scatter(hidden_states, full_target_hidden_states)
 
         hidden_states = self.project_from_hidden_norm(hidden_states)
         hidden_states = self.project_from_hidden(hidden_states)

@@ -25,6 +25,8 @@ from src.local_utils import smooth_local_scores, tokens_to_attn, rescale_scores
 from src.transformer import Transformer2DModel, get_text_encoder_length
 from src.dataset_utils import tokenize_prompt, encode_prompt, process_image
 from src.v2_utils import prepare_cond_token
+from src.attention_utils import extract_image_to_text_attention, num_attention_layers
+from src.reference_cache import ReferenceKVCache, scheduled_mask_ratio
 
 EXAMPLE_DOC_STRING = """
     Examples:
@@ -59,8 +61,8 @@ def pilimage_to_token(pipe, image):
 class Pipeline(DiffusionPipeline):
     image_processor: VaeImageProcessor
     vqvae: VQModel
-    tokenizer: CLIPTokenizer or List
-    text_encoder: CLIPTextModelWithProjection or List
+    tokenizer: CLIPTokenizer
+    text_encoder: CLIPTextModelWithProjection
     transformer: Transformer2DModel
     scheduler: Scheduler
     tokenizer_t5: AutoTokenizer
@@ -168,11 +170,34 @@ class Pipeline(DiffusionPipeline):
         reference_strength: float = 1,
         lora_part_enable: Optional[bool] = False,       
         lora_scale: Optional[float] = None,           
+        edit_only_diffusion: bool = False,
+        return_attention: bool = False,
+        attention_layers: Optional[List[int]] = None,
+        attention_keywords: Optional[List[str]] = None,
+        sparse_target: Optional[bool] = None,
+        sparse_target_halo: Optional[int] = None,
+        use_reference_kv_cache: bool = True,
+        reference_kv_cache_threshold: float = 0.3,
     ):
         """
         The call function to the pipeline for generation.
 
         Args:
+            sparse_target (`bool`, *optional*):
+                Gather edit-mask target tokens plus halo after the stem. This enables
+                edit-only diffusion and preserves source tokens outside the edit mask.
+                Defaults to the checkpoint setting when an edit mask is provided.
+            sparse_target_halo (`int`, *optional*):
+                Halo radius on the Transformer grid (default: checkpoint setting, normally 1).
+            use_reference_kv_cache (`bool`, *optional*, defaults to `True`):
+                Capture full per-layer reference K/V once at the low-noise
+                transition, then pass only text and target through the model.
+                The cache is local to this generation and never stores target K/V.
+            reference_kv_cache_threshold (`float`, *optional*, defaults to `0.3`):
+                Start capture when the scheduled remaining editable mask fraction
+                is at most this value (0..1). This uses the cosine/linear masking
+                schedule before each forward, without reading GPU token counts.
+                Higher thresholds reuse more steps. Zero disables reuse.
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide image generation. If not defined, you need to pass `prompt_embeds`.
             height (`int`, *optional*, defaults to `self.transformer.config.sample_size * self.vae_scale_factor`):
@@ -238,16 +263,41 @@ class Pipeline(DiffusionPipeline):
                 `tuple` is returned where the first element is a list with the generated images.
         """
 
+        previous_attention_blocks = self.attention_enable_blocks
+        if return_attention:
+            if prompt is None:
+                raise ValueError("return_attention=True requires the original prompt text")
+            self.attention_enable_blocks = (
+                list(attention_layers) if attention_layers is not None
+                else list(range(num_attention_layers(self.transformer)))
+            )
         if self.attention_enable_blocks is not None:
             self.transformer.register_attention_hooks(self.attention_enable_blocks)
         self.current_attention_list = {}
         self.selected_mask_token = {}
         self.local_scores_list = {}
+        self.last_attention_analysis = None
+
+        if sparse_target is None:
+            sparse_target = self.transformer.config.sparse_target and mask_image is not None
+        if sparse_target:
+            edit_only_diffusion = True
+        if sparse_target_halo is not None and (not isinstance(sparse_target_halo, int) or sparse_target_halo < 0):
+            raise ValueError("sparse_target_halo must be a non-negative integer")
+        if not 0.0 <= reference_kv_cache_threshold <= 1.0:
+            raise ValueError("reference_kv_cache_threshold must be between 0 and 1")
 
         if (prompt_embeds is not None and encoder_hidden_states is None) or (
             prompt_embeds is None and encoder_hidden_states is not None
         ):
             raise ValueError("pass either both `prompt_embeds` and `encoder_hidden_states` or neither")
+
+        if edit_only_diffusion and (reference_image is None or mask_image is None):
+            raise ValueError(
+                "edit_only_diffusion=True requires both reference_image (source) and mask_image (1=edit)"
+            )
+        if sparse_target and not self.transformer.config.sparse_target:
+            self.transformer.enable_sparse_target()
 
         if (negative_prompt_embeds is not None and negative_encoder_hidden_states is None) or (
             negative_prompt_embeds is None and negative_encoder_hidden_states is not None
@@ -326,8 +376,9 @@ class Pipeline(DiffusionPipeline):
 
         starting_mask_ratio = 1.0
 
+        token_edit_mask = None
         if mask_image is not None:
-            mask = self.mask_processor.preprocess(
+            token_edit_mask = self.mask_processor.preprocess(
                 mask_image, height // self.vae_scale_factor, width // self.vae_scale_factor
             )
 
@@ -347,46 +398,92 @@ class Pipeline(DiffusionPipeline):
 
             reference_image_hidden_states = prepare_cond_token(split_vae_encode=None, pixel_values=reference_image, vq_model=self.vqvae)
             reference_image_hidden_states = reference_image_hidden_states.reshape(-1, height // self.vae_scale_factor, width // self.vae_scale_factor) # 处理和训练保持了一致
+            if reference_image_hidden_states.shape[0] == 1:
+                reference_image_hidden_states = reference_image_hidden_states.expand(batch_size, -1, -1)
+            elif reference_image_hidden_states.shape[0] * num_images_per_prompt == batch_size:
+                reference_image_hidden_states = reference_image_hidden_states.repeat_interleave(num_images_per_prompt, dim=0)
 
             if mask_image is not None:
-                latents = reference_image_hidden_states
-                mask = mask.reshape(mask.shape[0], latents.shape[-2], latents.shape[-1]).bool().to(latents.device)
-                latents[mask] = self.scheduler.config.mask_token_id  # replace the mask region needs update
-                starting_mask_ratio = mask.sum() / latents.numel()
+                source_tokens = reference_image_hidden_states.clone()
+                latents = source_tokens.clone()
+                token_edit_mask = token_edit_mask.reshape(
+                    token_edit_mask.shape[0], latents.shape[-2], latents.shape[-1]
+                ).bool().to(latents.device)
+                if token_edit_mask.shape[0] == 1 and latents.shape[0] > 1:
+                    token_edit_mask = token_edit_mask.expand(latents.shape[0], -1, -1)
+                if token_edit_mask.shape != latents.shape:
+                    raise ValueError(
+                        f"Mask token grid {tuple(token_edit_mask.shape)} does not match "
+                        f"source token grid {tuple(latents.shape)}"
+                    )
+                latents[token_edit_mask] = self.scheduler.config.mask_token_id
+                starting_mask_ratio = token_edit_mask.float().mean()
             
-        if reference_strength != 1:
+        if reference_image is not None:
             for name, module in self.transformer.named_modules():
                 if not name.endswith(".attn"):
                     continue
-                module.reference_strength_factor = torch.ones(1, 1) * reference_strength
+                if reference_strength != 1:
+                    module.reference_strength_factor = torch.ones(1, 1) * reference_strength
+                elif hasattr(module, "reference_strength_factor"):
+                    delattr(module, "reference_strength_factor")
 
         intermediate_latents = {}
-        
+        # Static IDs/masks and the full CFG reference input are prepared once.
+        # Cached forwards omit this reference input entirely; source VQ tokens
+        # stay available to the sampler for preservation outside the edit mask.
+        img_ids = _prepare_latent_image_ids(
+            latents.shape[-2], latents.shape[-1], latents.device, latents.dtype,
+            up_sample=self.transformer.down_block.downsample is None,
+        )
+        text_length = (encoder_hidden_states.shape[1] if '_' not in self.transformer.text_encoder_architecture
+                       else get_text_encoder_length(self.transformer.text_encoder_architecture, return_main=True))
+        txt_ids = torch.zeros(text_length, 3, device=encoder_hidden_states.device, dtype=encoder_hidden_states.dtype)
+        model_edit_mask = None
+        if sparse_target:
+            model_edit_mask = torch.cat([token_edit_mask] * 2) if guidance_scale > 1.0 else token_edit_mask
+        reference_input, reference_image_ids = None, None
+        if reference_image is not None:
+            reference_input = (torch.cat([reference_image_hidden_states] * 2)
+                               if guidance_scale > 1.0 else reference_image_hidden_states)
+            reference_image_ids = _prepare_latent_image_ids(
+                reference_input.shape[-2], reference_input.shape[-1], reference_input.device, reference_input.dtype,
+                up_sample=self.transformer.down_block.downsample is None,
+            )
+
+        reference_kv_cache = None
+        cache_capture_step = None
+        if use_reference_kv_cache and reference_image is not None and reference_kv_cache_threshold > 0:
+            # Never spend memory capturing a cache if no later step can reuse it.
+            cache_capture_step = next((
+                step for step in range(max(0, len(self.scheduler.timesteps) - 1))
+                if scheduled_mask_ratio(step, len(self.scheduler.timesteps), self.scheduler.config.masking_schedule)
+                <= reference_kv_cache_threshold
+            ), None)
+            if cache_capture_step is not None:
+                reference_kv_cache = ReferenceKVCache()
+        self.last_reference_cache_info = {
+            "enabled": reference_kv_cache is not None,
+            "threshold": reference_kv_cache_threshold,
+            "capture_step": cache_capture_step, "reuse_steps": [],
+        }
+
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             timesteps_iter = enumerate(self.scheduler.timesteps)
 
             for i, timestep in timesteps_iter:
                 if guidance_scale > 1.0:
                     model_input = torch.cat([latents] * 2)
-                    if reference_image is not None:
-                        reference_input = torch.cat([reference_image_hidden_states, reference_image_hidden_states], dim=0)
                 else:
                     model_input = latents
-                    if reference_image is not None:
-                        reference_input = reference_image_hidden_states
-                    
-                img_ids = _prepare_latent_image_ids(model_input.shape[-2], model_input.shape[-1],
-                                                    model_input.device, model_input.dtype, up_sample=height!=1024) # torch.Size([1024, 3])
-                
-                if '_' not in self.transformer.text_encoder_architecture:
-                    txt_ids = torch.zeros(encoder_hidden_states.shape[1],3).to(device = encoder_hidden_states.device, dtype = encoder_hidden_states.dtype)
-                else:
-                    txt_ids = torch.zeros(get_text_encoder_length(self.transformer.text_encoder_architecture, return_main=True),3).to(device = encoder_hidden_states.device, dtype = encoder_hidden_states.dtype)
-                
+
                 # image edit
                 if reference_image is not None:
-                    reference_image_ids = _prepare_latent_image_ids(reference_input.shape[-2], reference_input.shape[-1], 
-                                                            reference_input.device, reference_input.dtype, up_sample=height!=1024)
+                    step_cache = (reference_kv_cache if cache_capture_step is not None
+                                  and i >= cache_capture_step else None)
+                    reuse_reference = step_cache is not None and step_cache.ready
+                    if reuse_reference:
+                        self.last_reference_cache_info["reuse_steps"].append(i)
                     model_output = self.transformer(
                         hidden_states = model_input,
                         micro_conds=micro_conds,
@@ -395,11 +492,20 @@ class Pipeline(DiffusionPipeline):
                         img_ids = img_ids,
                         txt_ids = txt_ids,
                         timestep = torch.tensor([timestep]*model_input.shape[0], device=model_input.device, dtype=torch.long),
-                        reference_image_hidden_states=reference_input.to(dtype=model_input.dtype, device=model_input.device),
-                        reference_image_ids=reference_image_ids,
+                        reference_image_hidden_states=None if reuse_reference else reference_input,
+                        reference_image_ids=None if reuse_reference else reference_image_ids,
+                        reference_kv_cache=step_cache,
                         joint_attention_kwargs={"scale": lora_scale},
                         lora_part_enable=lora_part_enable,
+                        sparse_target=sparse_target,
+                        sparse_target_halo=sparse_target_halo,
+                        target_edit_mask=model_edit_mask,
                     )
+                    if step_cache is not None and not reuse_reference:
+                        self.last_reference_cache_info.update({
+                            "reference_length": step_cache.reference_length,
+                            "num_layers": step_cache.num_layers,
+                        })
                 else:
                     # text to image
                     model_output = self.transformer(
@@ -410,16 +516,32 @@ class Pipeline(DiffusionPipeline):
                         img_ids = img_ids,
                         txt_ids = txt_ids,
                         timestep = torch.tensor([timestep]*model_input.shape[0], device=model_input.device, dtype=torch.long),
+                        sparse_target=False,
                     )
 
                 if guidance_scale > 1.0:
                     uncond_logits, cond_logits = model_output.chunk(2)  # uncond comes before concat
                     model_output = uncond_logits + guidance_scale * (cond_logits - uncond_logits)
 
-                current_attention, local_stacked, _ = tokens_to_attn(pipe=self, global_enable=False, prompt=prompt)
+                if self.local_guidance > 0 or return_target_step_images is not None:
+                    current_attention, local_stacked, _ = tokens_to_attn(
+                        pipe=self, global_enable=False, prompt=prompt
+                    )
+                    local_scores = rescale_scores(local_stacked) # [bs, seq]
+                    local_scores = smooth_local_scores(local_scores, method='adaptive', strength=1.0) # smoothen
+                else:
+                    current_attention, local_scores = None, None
 
-                local_scores = rescale_scores(local_stacked) # [bs, seq]
-                local_scores = smooth_local_scores(local_scores, method='adaptive', strength=1.0) # smoothen
+                if return_attention and i == len(self.scheduler.timesteps) - 1:
+                    self.last_attention_analysis = extract_image_to_text_attention(
+                        transformer=self.transformer,
+                        tokenizer=[self.tokenizer, self.tokenizer_t5]
+                        if self.tokenizer_t5 is not None else self.tokenizer,
+                        prompt=prompt,
+                        layers=self.attention_enable_blocks,
+                        keywords=attention_keywords,
+                        guidance_enabled=guidance_scale > 1.0,
+                    )
 
                 latents = self.scheduler.step(
                     model_output=model_output,  # torch.Size([1, 8192, 32, 32])
@@ -431,7 +553,14 @@ class Pipeline(DiffusionPipeline):
                     local_guidance=self.local_guidance,
                     local_scores=local_scores, # [batch, seq]
                     ref_latents=reference_image_hidden_states if reference_image is not None else None, # torch.Size([1, 32, 32])
+                    edit_mask=token_edit_mask if edit_only_diffusion else None,
+                    source_tokens=source_tokens if edit_only_diffusion else None,
                 ).prev_sample   # torch.Size([1, 32, 32])
+
+                if edit_only_diffusion:
+                    latents = torch.where(token_edit_mask, latents, source_tokens)
+                    if not torch.equal(latents[~token_edit_mask], source_tokens[~token_edit_mask]):
+                        raise AssertionError("Preserve-region tokens changed during edit-only sampling")
 
                 # See Attention: Decode intermediate images at target steps
                 if return_target_step_images is not None:
@@ -450,10 +579,18 @@ class Pipeline(DiffusionPipeline):
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, timestep, latents)
         
+        # Release potentially large per-layer K/V before VQ decoding. Processors
+        # never own the cache, so it cannot leak into the next request or training.
+        if reference_kv_cache is not None:
+            reference_kv_cache.clear()
+
         if output_type == "latent":
             output = latents
         else:
             output = self.safe_decode_latents(latents=latents, batch_size=batch_size, height=height, width=width, output_type=output_type)
+        if return_attention:
+            self.transformer.clear_attention_hooks()
+            self.attention_enable_blocks = previous_attention_blocks
         
         # See Attention: Decode intermediate images at target steps
         if return_target_step_images:
@@ -471,4 +608,3 @@ class Pipeline(DiffusionPipeline):
             if not return_dict:
                 return (output,)
             return ImagePipelineOutput(output)
-        
