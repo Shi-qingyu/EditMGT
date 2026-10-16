@@ -1,0 +1,6 @@
+# Install explicitly in the existing training environment; benchmark scripts do not install packages.
+lpips==0.1.4
+git+https://github.com/openai/CLIP.git
+# Inter-Edit alpha-in/alpha-out additionally require AlphaCLIP and its visual weights:
+# https://github.com/SunzeY/AlphaCLIP
+# DINO v1 is loaded from facebookresearch/dino, or --dino-repo/--dino-weights for offline use.

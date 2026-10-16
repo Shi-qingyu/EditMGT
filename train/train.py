@@ -35,6 +35,11 @@ from src.mask_utils import (
     save_mask_debug_visualization,
 )
 from src.inter_edit_dataset import DEFAULT_INTER_EDIT_ROOT, InterEditDataset
+from src.magicbrush_dataset import MagicBrushDataset
+from src.mixed_edit_dataset import MixedEditDataset
+from src.timestep_sampling import MaskRatioSampler
+from src.sparse_utils import expand_edit_mask_for_halo
+from src.mask_schedule import validate_inference_shift
 from src.train_validation import (
     prepare_inter_edit_validation_cases,
     run_inter_edit_validation,
@@ -46,6 +51,20 @@ logger = get_logger(__name__, log_level="INFO")
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ['NCCL_DEBUG'] = 'ERROR'
+
+
+def make_mask_ratio_sampler(args):
+    return MaskRatioSampler(
+        distribution=args.timestep_sampling,
+        logit_mean=args.timestep_logit_mean,
+        logit_std=args.timestep_logit_std,
+        shift=args.timestep_shift,
+        cosine_mix=args.timestep_cosine_mix,
+        low_noise_mix=args.timestep_low_noise_mix,
+        low_noise_threshold=args.condition_cache_threshold,
+        min_mask_ratio=args.min_masking_rate,
+    )
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -226,6 +245,8 @@ def parse_args():
     parser.add_argument("--validation_sample_indices", type=int, nargs="+", default=None,
                         help="Explicit test row indices; overrides --validation_num_images.")
     parser.add_argument("--validation_num_inference_steps", type=int, default=18)
+    parser.add_argument("--validation_inference_shift", type=validate_inference_shift, default=1.0,
+                        help="Inference-only mask schedule shift for fixed test previews; independent of training timestep_shift.")
     parser.add_argument("--validation_guidance_scale", type=float, default=6.0)
     parser.add_argument("--validation_reference_strength", type=float, default=1.0)
     parser.add_argument("--validation_disable_reference_kv_cache", action="store_true",
@@ -269,10 +290,45 @@ def parse_args():
     parser.add_argument("--split_manifest", type=str, default=None)
     parser.add_argument("--dataset_split", choices=["train", "test"], default="train")
     parser.add_argument(
+        "--dataset_language", choices=["all", "en", "zh"], default="all",
+        help="Inter-Edit prompt language for BOTH the training loader and official test visualizations.",
+    )
+    parser.add_argument(
         "--dataset_cache_dir", type=str, default=None,
         help="Writable tar member-index cache for InterEditDataset (default: data/inter_edit_tar_index).",
     )
+    parser.add_argument(
+        "--magicbrush_data_dir", type=str, default=None,
+        help="Optional local MagicBrush release to mix with Inter-Edit; only train-*.parquet is used.",
+    )
+    parser.add_argument(
+        "--magicbrush_probability", type=float, default=0.2,
+        help="Per-example MagicBrush sampling probability when mixing; Inter-Edit receives the remaining weight.",
+    )
+    parser.add_argument("--magicbrush_read_batch_size", type=int, default=4,
+                        help="Bound the number of image-containing parquet rows materialized together per worker.")
     parser.add_argument("--min_masking_rate", type=float, default=0.0)
+    parser.add_argument(
+        "--timestep_sampling", choices=["cosine", "uniform", "logit_normal"], default="cosine",
+        help="Training distribution over editable-token mask ratios; cosine preserves the original uniform-progress sampler.",
+    )
+    parser.add_argument("--timestep_logit_mean", type=float, default=0.0,
+                        help="Mean of the normal variable before sigmoid; positive favors more masking.")
+    parser.add_argument("--timestep_logit_std", type=float, default=1.0)
+    parser.add_argument("--timestep_shift", type=float, default=1.0,
+                        help="Main-component mask-ratio shift s*r/(1+(s-1)*r); s>1 favors higher noise.")
+    parser.add_argument("--timestep_cosine_mix", type=float, default=0.0,
+                        help="Probability of an unshifted original-cosine sample to retain endpoint coverage.")
+    parser.add_argument("--timestep_low_noise_mix", type=float, default=0.0,
+                        help="Probability of a uniform sample between min_masking_rate and condition_cache_threshold.")
+    parser.add_argument(
+        "--time_conditioning", choices=["legacy", "mask_ratio"], default="legacy",
+        help="Use normalized mask ratio for matching train/infer time embeddings, or preserve old-checkpoint time units.",
+    )
+    parser.add_argument(
+        "--mask_loss_reduction", choices=["token", "sample"], default="token",
+        help="Average CE over all supervised tokens (legacy) or normalize each example before averaging.",
+    )
     parser.add_argument("--cond_dropout_prob", type=float, default=0.0)
     parser.add_argument("--max_grad_norm", default=50.0, type=float, help="Max gradient norm.", required=False)
     parser.add_argument("--use_lora", action="store_true", help="Fine tune the model using LoRa")
@@ -298,15 +354,27 @@ def parse_args():
     parser.add_argument(
         "--edit_only_diffusion",
         action="store_true",
-        help="Corrupt and supervise only GT edit-mask tokens; preserve tokens come from the source image.",
+        help="Corrupt/supervise the edit-generation region (including halo when enabled); preserve tokens come from source.",
     )
     parser.add_argument(
         "--sparse_target", action="store_true",
         help="Use full reference + sparse edit/halo target tokens; enables --edit_only_diffusion.",
     )
     parser.add_argument(
-        "--sparse_target_halo", type=int, default=1,
-        help="Sparse target halo radius on the Transformer grid after downsampling.",
+        "--sparse_target_halo", type=int, default=2,
+        help="Target-mask dilation radius on the Transformer grid after downsampling.",
+    )
+    parser.add_argument(
+        "--supervise_target_halo", action=argparse.BooleanOptionalAction, default=True,
+        help="Corrupt/supervise the expanded active VQ region and regenerate it in inference; disable for context-only halo.",
+    )
+    parser.add_argument(
+        "--cache_conditioning", action="store_true",
+        help="Train low-noise target-independent text/reference prefixes with fixed modulation for joint KV reuse.",
+    )
+    parser.add_argument(
+        "--condition_cache_threshold", type=float, default=0.3,
+        help="Scheduled edit-mask ratio below which prefix isolation/fixed context modulation apply.",
     )
     parser.add_argument(
         "--mask_debug_dir",
@@ -325,10 +393,28 @@ def parse_args():
         parser.error("--validation_reference_kv_cache_threshold must be between 0 and 1")
     if args.sparse_target_halo < 0:
         parser.error("--sparse_target_halo must be non-negative")
+    if args.dataset_language != "all" and args.instance_dataset != "InterEditDataset":
+        parser.error("--dataset_language is supported only for InterEditDataset")
+    if args.magicbrush_data_dir and (
+        args.instance_dataset != "InterEditDataset" or args.dataset_split != "train" or not args.train_edit_model
+    ):
+        parser.error("MagicBrush mixing requires InterEditDataset, --dataset_split train and --train_edit_model")
+    if not 0.0 < args.magicbrush_probability < 1.0 or args.magicbrush_read_batch_size < 1:
+        parser.error("MagicBrush probability must be in (0,1) and its read batch size must be positive")
     if args.sparse_target:
         args.edit_only_diffusion = True
+    if not 0.0 < args.condition_cache_threshold <= 1.0:
+        parser.error("--condition_cache_threshold must be in (0,1]")
+    if args.cache_conditioning and not args.train_edit_model:
+        parser.error("--cache_conditioning requires --train_edit_model")
+    if args.cache_conditioning and args.min_masking_rate > args.condition_cache_threshold:
+        parser.error("--min_masking_rate would exclude the entire cache-conditioning phase")
     if args.edit_only_diffusion and not args.train_edit_model:
         parser.error("--edit_only_diffusion/--sparse_target requires --train_edit_model")
+    try:
+        make_mask_ratio_sampler(args)
+    except ValueError as error:
+        parser.error(str(error))
 
     if args.report_to == "wandb":
         if not is_wandb_available():
@@ -362,6 +448,13 @@ def initialize_local_cuda_device():
 
 def main(args):
     wandb = None
+    mask_ratio_sampler = make_mask_ratio_sampler(args)
+    timestep_sampling_config = {
+        "version": 1,
+        "time_conditioning": args.time_conditioning,
+        "mask_loss_reduction": args.mask_loss_reduction,
+        "sampler": mask_ratio_sampler.to_dict(),
+    }
     if args.allow_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -442,12 +535,13 @@ def main(args):
             lambda: prepare_inter_edit_validation_cases(
                 validation_data_dir, validation_output_dir, args.resolution,
                 num_images=args.validation_num_images, sample_indices=args.validation_sample_indices,
-                cache_dir=args.dataset_cache_dir,
+                cache_dir=args.dataset_cache_dir, language=args.dataset_language,
             ),
             description="Loading Inter-Edit test visualization cases",
         )
         if accelerator.is_main_process:
             logger.info("Fixed Inter-Edit test visualization sample IDs: %s", [case["sample_id"] for case in validation_cases])
+            logger.info("Inter-Edit train/test language filter: %s", args.dataset_language)
 
     text_encoder, tokenizer, text_att_dim, text_proj_dim = init_text_encoder(text_encoder_architecture=args.text_encoder_architecture,
                                 pretrained_model_name_or_path=args.pretrained_model_name_or_path, 
@@ -499,7 +593,10 @@ def main(args):
         del model_tmp 
 
     if args.sparse_target:
-        model.enable_sparse_target(halo=args.sparse_target_halo)
+        model.enable_sparse_target(halo=args.sparse_target_halo, supervise_halo=args.supervise_target_halo)
+    if args.cache_conditioning:
+        model.enable_condition_cache_training(threshold=args.condition_cache_threshold)
+    model.set_time_conditioning(args.time_conditioning)
 
     if args.use_lora:
         lora_config = LoraConfig(
@@ -540,6 +637,8 @@ def main(args):
 
     def save_model_hook(models, weights, output_dir):
         if accelerator.is_main_process:
+            with open(os.path.join(output_dir, "timestep_sampling_config.json"), "w") as f:
+                json.dump(timestep_sampling_config, f, indent=2)
             transformer_lora_layers_to_save = None
 
             for model_ in models:
@@ -567,23 +666,63 @@ def main(args):
                         return super().default(obj)
                 with open(os.path.join(output_dir, "lora_config.json"), 'w') as f:
                     json.dump(lora_config.to_dict(), f, indent=2, cls=LoraConfigEncoder)
+                with open(os.path.join(output_dir, "time_conditioning_config.json"), "w") as f:
+                    json.dump({"time_conditioning": args.time_conditioning}, f)
                 if args.sparse_target:
                     with open(os.path.join(output_dir, "sparse_target_config.json"), "w") as f:
-                        json.dump({"sparse_target_halo": args.sparse_target_halo}, f)
+                        json.dump({
+                            "sparse_target_halo": args.sparse_target_halo,
+                            "supervise_target_halo": args.supervise_target_halo,
+                        }, f)
+                if args.cache_conditioning:
+                    with open(os.path.join(output_dir, "condition_cache_config.json"), "w") as f:
+                        json.dump({"condition_cache_threshold": args.condition_cache_threshold}, f)
 
             if args.use_ema:
                 ema.save_pretrained(os.path.join(output_dir, "ema_model"))
 
     def load_model_hook(models, input_dir):
         transformer = None
+        sampling_config_path = Path(input_dir) / "timestep_sampling_config.json"
+        if sampling_config_path.is_file():
+            with sampling_config_path.open() as f:
+                saved_sampling_config = json.load(f)
+            if saved_sampling_config != timestep_sampling_config:
+                raise ValueError(
+                    "Checkpoint timestep sampling/time conditioning/loss reduction differs from this run. "
+                    "Resume with matching options, or start a new output directory for the changed objective."
+                )
+        elif (args.time_conditioning != "legacy" or args.mask_loss_reduction != "token" or
+              args.timestep_sampling != "cosine" or args.timestep_shift != 1.0 or
+              args.timestep_cosine_mix != 0.0 or args.timestep_low_noise_mix != 0.0):
+            raise ValueError(
+                "This checkpoint predates configurable time sampling. Resume it in legacy cosine/token mode, "
+                "or start a separate run for normalized mask-ratio conditioning and the new sampler."
+            )
 
         while len(models) > 0:
             model_ = unwrap_training_model(models.pop())
             if isinstance(model_, Transformer2DModel):
                 if args.use_lora:
+                    time_config_path = Path(input_dir) / "time_conditioning_config.json"
+                    saved_time_mode = "legacy"
+                    if time_config_path.is_file():
+                        with time_config_path.open() as f:
+                            saved_time_mode = json.load(f)["time_conditioning"]
+                    if model_.config.time_conditioning != saved_time_mode:
+                        raise ValueError("LoRA checkpoint time conditioning differs from --time_conditioning")
                     transformer = model_
                 else:
                     load_model = Transformer2DModel.from_pretrained(os.path.join(input_dir, "transformer"),low_cpu_mem_usage=False,device_map=None)
+                    if model_.config.time_conditioning != load_model.config.time_conditioning:
+                        raise ValueError("Checkpoint time conditioning differs from --time_conditioning")
+                    if (model_.config.cache_conditioning != load_model.config.cache_conditioning or
+                        (model_.config.cache_conditioning and
+                         model_.config.condition_cache_threshold != load_model.config.condition_cache_threshold)):
+                        raise ValueError(
+                            "Checkpoint cache-conditioning settings differ from this run; "
+                            "use matching --cache_conditioning/--condition_cache_threshold or a separate output directory."
+                        )
                     # Diffusers checkpoints store the original model's keys.
                     # Load into that model regardless of compile/DDP wrappers.
                     model_.load_state_dict(load_model.state_dict())
@@ -593,6 +732,12 @@ def main(args):
 
         if transformer is not None:
             transformer = load_lora_adapter(transformer, input_dir)
+            if args.sparse_target:
+                # Explicit training options govern the new objective even when
+                # continuing a previous context-only LoRA checkpoint.
+                transformer.enable_sparse_target(
+                    halo=args.sparse_target_halo, supervise_halo=args.supervise_target_halo,
+                )
 
         if args.use_ema:
             ema_model_path = os.path.join(input_dir, "ema_model")
@@ -731,7 +876,45 @@ def main(args):
             text_encoder_architecture=args.text_encoder_architecture,
             rank=accelerator.process_index, world_size=accelerator.num_processes,
             cache_dir=args.dataset_cache_dir, seed=args.seed if args.seed is not None else 42,
+            language=args.dataset_language,
         )
+        logger.info("Inter-Edit rank %s: %s %s samples, language=%s (before empty-mask filtering)",
+                    accelerator.process_index, len(dataset), args.dataset_split, args.dataset_language)
+        if args.magicbrush_data_dir:
+            inter_edit_dataset = dataset
+            magicbrush_dataset = MagicBrushDataset(
+                root_dir=args.magicbrush_data_dir, split="train",
+                tokenizer=tokenizer, size=args.resolution,
+                text_encoder_architecture=args.text_encoder_architecture,
+                rank=accelerator.process_index, world_size=accelerator.num_processes,
+                seed=args.seed if args.seed is not None else 42, language=args.dataset_language,
+                cache_dir=Path(args.dataset_cache_dir) / "magicbrush" if args.dataset_cache_dir else None,
+                read_batch_size=args.magicbrush_read_batch_size,
+            )
+            dataset = MixedEditDataset(
+                datasets=[inter_edit_dataset, magicbrush_dataset], names=["Inter-Edit", "MagicBrush"],
+                weights=[1.0 - args.magicbrush_probability, args.magicbrush_probability],
+                rank=accelerator.process_index, seed=args.seed if args.seed is not None else 42,
+            )
+            mixture_dir = Path(args.output_dir) / "data_mixture"
+            mixture_dir.mkdir(parents=True, exist_ok=True)
+            mixture_info = {
+                "rank": accelerator.process_index, "world_size": accelerator.num_processes,
+                "language_filter": args.dataset_language,
+                "count_scope": "rank-local, language-filtered, before empty-mask exclusions",
+                "sources": [
+                    {"name": "Inter-Edit", "root": str(inter_edit_dataset.reader.root), "split": "train",
+                     "sample_count": len(inter_edit_dataset), "probability": 1.0 - args.magicbrush_probability},
+                    {"name": "MagicBrush", "root": str(magicbrush_dataset.root.resolve()), "split": "train",
+                     "sample_count": len(magicbrush_dataset), "probability": args.magicbrush_probability},
+                ],
+                "validation": {"dataset": "Inter-Edit", "split": "test", "language_filter": args.dataset_language},
+            }
+            (mixture_dir / f"rank_{accelerator.process_index:04d}.json").write_text(
+                json.dumps(mixture_info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+            )
+            logger.info("Mixing Inter-Edit/MagicBrush with probabilities %.2f/%.2f; MagicBrush rank-local rows=%s",
+                        1.0 - args.magicbrush_probability, args.magicbrush_probability, len(magicbrush_dataset))
     elif args.instance_dataset == 'HuggingFaceDataset':
         # Inter-Edit and local parquet readers do not depend on HF datasets.
         from datasets import load_dataset
@@ -791,7 +974,8 @@ def main(args):
 
     if args.instance_dataset == "InterEditDataset":
         # Rank/worker ownership is already handled by the dataset. Preparing the
-        # loader again would dispatch/shard it a second time and lose coverage.
+        # loader (including its optional MagicBrush mixture) again would shard
+        # it a second time and lose coverage.
         # The training loop moves each input tensor to accelerator.device.
         model, optimizer, lr_scheduler = accelerator.prepare(model, optimizer, lr_scheduler)
     else:
@@ -832,6 +1016,7 @@ def main(args):
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+    logger.info("  Timestep/noise sampling = %s", timestep_sampling_config)
 
     resume_from_checkpoint = args.resume_from_checkpoint
     if resume_from_checkpoint:
@@ -861,6 +1046,10 @@ def main(args):
         global_step = int(os.path.basename(resume_from_checkpoint).split("-")[1])
         first_epoch = global_step // num_update_steps_per_epoch
 
+    if accelerator.is_main_process:
+        with open(os.path.join(args.output_dir, "timestep_sampling_config.json"), "w") as f:
+            json.dump(timestep_sampling_config, f, indent=2)
+
     # This is to solve the inconsistent tensor device issue
     if args.use_ema:
         ema.shadow_params = [p.to(accelerator.device) for p in ema.shadow_params]
@@ -888,6 +1077,7 @@ def main(args):
                     report = run_inter_edit_validation(
                         pipe, validation_cases, validation_output_dir, step,
                         num_inference_steps=args.validation_num_inference_steps,
+                        inference_shift=args.validation_inference_shift,
                         guidance_scale=args.validation_guidance_scale,
                         reference_strength=args.validation_reference_strength,
                         seed=args.validation_seed, edit_only_diffusion=args.edit_only_diffusion,
@@ -962,9 +1152,7 @@ def main(args):
                         vq_model=vq_model,
                     )
 
-                timesteps = torch.rand(batch_size, device=image_tokens.device)
-                mask_prob = torch.cos(timesteps * math.pi * 0.5)
-                mask_prob = mask_prob.clip(args.min_masking_rate)
+                mask_prob = mask_ratio_sampler.sample(batch_size, device=image_tokens.device)
 
                 mask_id = accelerator.unwrap_model(model).config.vocab_size - 1
                 batch_randperm = torch.rand(batch_size, seq_len, device=image_tokens.device).argsort(dim=-1)
@@ -977,21 +1165,30 @@ def main(args):
                         batch["edit_mask"].to(image_tokens.device, non_blocking=True),
                         (token_side, token_side),
                     )
-                    edit_token_count = token_edit_mask.sum(dim=-1)
+                    token_generation_mask = token_edit_mask
+                    if args.sparse_target and args.supervise_target_halo:
+                        grid_side = (token_side // 2 if unwrap_training_model(model).down_block.downsample is not None
+                                     else token_side)
+                        token_generation_mask = expand_edit_mask_for_halo(
+                            token_edit_mask, (token_side, token_side), (grid_side, grid_side), args.sparse_target_halo,
+                        )
+                    edit_token_count = token_generation_mask.sum(dim=-1)
                     if (edit_token_count == 0).any():
                         raise ValueError("Encountered an empty edit mask after token-grid resizing")
 
                     input_ids, labels, corruption_mask, loss_mask = prepare_edit_only_corruption(
                         target_tokens=image_tokens,
                         source_tokens=source_tokens,
-                        token_edit_mask=token_edit_mask,
+                        token_edit_mask=token_generation_mask,
                         mask_probability=mask_prob,
                         mask_token_id=mask_id,
                     )
-                    preserve_supervised_count = (loss_mask & ~token_edit_mask).sum()
+                    preserve_supervised_count = (loss_mask & ~token_generation_mask).sum()
                     assert preserve_supervised_count.item() == 0
 
                     edit_token_ratio = token_edit_mask.float().mean()
+                    generation_token_ratio = token_generation_mask.float().mean()
+                    halo_supervised_count = (loss_mask & ~token_edit_mask).sum()
                     corrupted_edit_token_ratio = (
                         corruption_mask.sum() / edit_token_count.sum().clamp(min=1)
                     )
@@ -999,7 +1196,7 @@ def main(args):
 
                     if args.mask_debug_dir and accelerator.is_main_process and not mask_debug_saved:
                         save_mask_debug_visualization(
-                            reference_values[0], batch["edit_mask"][0], token_edit_mask[0],
+                            reference_values[0], batch["edit_mask"][0], token_generation_mask[0],
                             (token_side, token_side),
                             os.path.join(args.mask_debug_dir, "mask_alignment.png"),
                         )
@@ -1079,7 +1276,8 @@ def main(args):
                         pooled_projections=cond_embeds, # should be (batch_size, projection_dim)
                         img_ids = img_ids,
                         txt_ids = txt_ids,
-                        timestep = mask_prob * 1000,
+                        timestep = mask_prob if args.time_conditioning == "mask_ratio" else mask_prob * 1000,
+                        mask_ratio=mask_prob,
                         sparse_target=args.sparse_target,
                         target_edit_mask=token_edit_mask if args.sparse_target else None,
                         # ----- edit
@@ -1094,16 +1292,29 @@ def main(args):
                     .reshape(-1, codebook_size)
                 )
 
-                loss = F.cross_entropy(
-                    logits,
-                    labels.view(-1),
-                    ignore_index=-100,
-                    reduction="mean",
-                )
+                if args.mask_loss_reduction == "sample":
+                    token_loss = F.cross_entropy(
+                        logits, labels.reshape(-1), ignore_index=-100, reduction="none",
+                    ).reshape(batch_size, -1)
+                    supervised_per_sample = (labels.reshape(batch_size, -1) != -100).sum(dim=-1)
+                    sample_loss = token_loss.sum(dim=-1) / supervised_per_sample.clamp(min=1)
+                    # Avoid silently weighting high-noise or large edits more
+                    # simply because they contain more supervised tokens.
+                    loss = sample_loss.sum() / (supervised_per_sample > 0).sum().clamp(min=1)
+                else:
+                    loss = F.cross_entropy(
+                        logits, labels.reshape(-1), ignore_index=-100, reduction="mean",
+                    )
 
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
-                avg_masking_rate = accelerator.gather(mask_prob.repeat(args.train_batch_size)).mean()
+                noise_stats = torch.stack((
+                    mask_prob.mean(),
+                    (mask_prob <= args.condition_cache_threshold).float().mean(),
+                ))
+                avg_noise_stats = accelerator.gather(noise_stats.unsqueeze(0)).mean(dim=0)
+                avg_masking_rate = avg_noise_stats[0]
+                avg_low_noise_fraction = avg_noise_stats[1]
 
                 accelerator.backward(loss)
 
@@ -1125,10 +1336,13 @@ def main(args):
                         "step_loss": avg_loss.item(),
                         "lr": lr_scheduler.get_last_lr()[0],
                         "avg_masking_rate": avg_masking_rate.item(),
+                        "low_noise_sample_fraction": avg_low_noise_fraction.item(),
                     }
                     if args.edit_only_diffusion:
                         logs.update({
                             "edit_token_ratio": edit_token_ratio.item(),
+                            "generation_token_ratio": generation_token_ratio.item(),
+                            "halo_supervised_token_count": halo_supervised_count.item(),
                             "corrupted_edit_token_ratio": corrupted_edit_token_ratio.item(),
                             "supervised_token_count": supervised_token_count.item(),
                             "preserve_supervised_token_count": preserve_supervised_count.item(),

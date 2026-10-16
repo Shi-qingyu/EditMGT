@@ -223,6 +223,39 @@ def apply_branch_rotary_emb(hidden_states, rotary_emb):
     return (hidden_states.float() * cos + rotated.float() * sin).to(hidden_states.dtype)
 
 
+def condition_prefix_attention(query, key, value, attention_mask, low_noise, text_len, main_query_length):
+    """Apply the block mask without allocating a dense [B,H,Q,K] mask.
+
+    Text and reference queries share a broadcast key mask: at low noise they
+    cannot read target keys. Target queries always retain full bidirectional
+    access. Per-sample low_noise supports mixed-noise training batches.
+    """
+    if attention_mask is not None and attention_mask.dtype == torch.bool:
+        attention_mask = torch.zeros_like(attention_mask, dtype=query.dtype).masked_fill(
+            ~attention_mask, float("-inf")
+        )
+    target_mask = attention_mask
+    prefix_base_mask = attention_mask
+    if attention_mask is not None and attention_mask.shape[-2] != 1:
+        target_mask = attention_mask[..., text_len:main_query_length, :]
+        prefix_base_mask = torch.cat((attention_mask[..., :text_len, :],
+                                      attention_mask[..., main_query_length:, :]), dim=-2)
+    blocked = torch.zeros(query.shape[0], 1, 1, key.shape[2], device=query.device, dtype=torch.bool)
+    blocked[..., text_len:main_query_length] = low_noise[:, None, None, None]
+    prefix_mask = torch.zeros_like(blocked, dtype=query.dtype).masked_fill(blocked, float("-inf"))
+    if prefix_base_mask is not None:
+        prefix_mask = prefix_mask + prefix_base_mask
+    prefix_query = torch.cat((query[:, :, :text_len], query[:, :, main_query_length:]), dim=2)
+    prefix_output = F.scaled_dot_product_attention(
+        prefix_query, key, value, attn_mask=prefix_mask, dropout_p=0.0, is_causal=False,
+    )
+    target_output = F.scaled_dot_product_attention(
+        query[:, :, text_len:main_query_length], key, value,
+        attn_mask=target_mask, dropout_p=0.0, is_causal=False,
+    )
+    return torch.cat((prefix_output[:, :, :text_len], target_output, prefix_output[:, :, text_len:]), dim=2)
+
+
 class ConFluxAttnProcessor2_0:
     # Modified from diffusers.models.attention_processor import FluxAttnProcessor2_0
     def __init__(self):
@@ -250,7 +283,10 @@ class ConFluxAttnProcessor2_0:
         lora_part_enable: bool = False,
         reference_kv_cache=None,
         reference_cache_key: Optional[str] = None,
+        condition_kv_cache=None,
+        condition_prefix_mask: Optional[torch.Tensor] = None,
     ) -> torch.FloatTensor:
+        reuse_condition = condition_kv_cache is not None and condition_kv_cache.ready
         batch_size, _, _ = hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
 
         with enable_lora((attn.to_q, attn.to_k, attn.to_v), not lora_part_enable):
@@ -303,8 +339,8 @@ class ConFluxAttnProcessor2_0:
         else:
             # visualize attention weights
             # Single block: hidden_states is already concatenated [text+image]
-            text_len = self.text_seq_len
-            image_len = query.shape[2] - text_len
+            text_len = condition_kv_cache.text_length if reuse_condition else self.text_seq_len
+            image_len = query.shape[2] if reuse_condition else query.shape[2] - text_len
 
         if image_rotary_emb is not None:
             # cprint(f'{query.shape} {image_rotary_emb[0].shape, image_rotary_emb[1].shape}', 'red')
@@ -315,7 +351,13 @@ class ConFluxAttnProcessor2_0:
         main_query_length = query.shape[2]
         main_key_length = key.shape[2]
         reference_query, reference_key, reference_value = None, None, None
-        if reference_image_hidden_states is not None:
+        if reuse_condition:
+            text_key, text_value, reference_key, reference_value = condition_kv_cache.get(reference_cache_key, query)
+            # Keep the full-forward key order [text, active target, reference].
+            key = torch.cat((text_key, key), dim=2)
+            value = torch.cat((text_value, value), dim=2)
+            main_key_length = key.shape[2]
+        elif reference_image_hidden_states is not None:
             reference_query = attn.to_q(reference_image_hidden_states)
             reference_key = attn.to_k(reference_image_hidden_states)
             reference_value = attn.to_v(reference_image_hidden_states)
@@ -336,6 +378,11 @@ class ConFluxAttnProcessor2_0:
                 # Store only the complete reference K/V, already normalized and
                 # rotated with type=1 and original reference spatial coordinates.
                 reference_kv_cache.store(reference_cache_key, reference_key, reference_value)
+            if condition_kv_cache is not None:
+                condition_kv_cache.store(
+                    reference_cache_key, key[:, :, :text_len], value[:, :, :text_len],
+                    reference_key, reference_value,
+                )
             query = torch.cat([query, reference_query], dim=2)
         elif reference_kv_cache is not None:
             # Cache-only inference has text/target queries and full reference
@@ -364,6 +411,8 @@ class ConFluxAttnProcessor2_0:
 
         # ------------- visualize attention weights
         if self.capture_attention:
+            if reuse_condition:
+                raise ValueError("Attention visualization needs live text queries; disable condition KV reuse")
             capture_attention_mask = attention_mask
             if reference_query is not None and reference_key is not None:
                 capture_query = query[:, :, :-reference_query.shape[2]]
@@ -374,6 +423,17 @@ class ConFluxAttnProcessor2_0:
                 capture_query = query
                 capture_key = key
 
+            if condition_prefix_mask is not None:
+                # Analysis reads live text/target query rows only. Match the
+                # structured prefix mask used by the actual attention below.
+                prefix_bias = torch.zeros(query.shape[0], 1, 1, key.shape[2],
+                                          device=query.device, dtype=query.dtype)
+                prefix_bias[..., text_len:main_key_length] = torch.where(
+                    condition_prefix_mask[:, None, None, None],
+                    prefix_bias.new_tensor(float("-inf")), prefix_bias.new_tensor(0.0),
+                )
+            else:
+                prefix_bias = None
             if capture_attention_mask is not None:
                 if capture_attention_mask.dtype == torch.bool:
                     capture_attention_mask = torch.zeros_like(capture_attention_mask, dtype=query.dtype).masked_fill(
@@ -390,6 +450,8 @@ class ConFluxAttnProcessor2_0:
             image_scores = torch.matmul(
                 capture_query[:, :, text_len:], capture_key.transpose(-2, -1)
             ) * scale
+            if prefix_bias is not None:
+                text_scores = text_scores + prefix_bias
             if capture_attention_mask is not None:
                 text_scores = text_scores + capture_attention_mask[..., :text_len, :]
                 image_mask = capture_attention_mask if capture_attention_mask.shape[-2] == 1 else capture_attention_mask[..., text_len:, :]
@@ -419,11 +481,25 @@ class ConFluxAttnProcessor2_0:
             })
         # ------------- 
 
-        hidden_states = F.scaled_dot_product_attention(
-            query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
-        )
+        if condition_prefix_mask is not None and not reuse_condition:
+            hidden_states = condition_prefix_attention(
+                query, key, value, attention_mask, condition_prefix_mask, text_len, main_query_length,
+            )
+        else:
+            hidden_states = F.scaled_dot_product_attention(
+                query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+            )
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
         hidden_states = hidden_states.to(query.dtype)
+
+        if reuse_condition:
+            # Double blocks have a target output projection; single blocks
+            # consume raw attention output in their shared attention/MLP path.
+            if attn.to_out is not None:
+                with enable_lora((attn.to_out[0],), not lora_part_enable):
+                    hidden_states = attn.to_out[0](hidden_states)
+                    hidden_states = attn.to_out[1](hidden_states)
+            return hidden_states
 
         if encoder_hidden_states is not None:
             if reference_image_hidden_states is not None:

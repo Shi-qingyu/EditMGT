@@ -26,7 +26,8 @@ from src.transformer import Transformer2DModel, get_text_encoder_length
 from src.dataset_utils import tokenize_prompt, encode_prompt, process_image
 from src.v2_utils import prepare_cond_token
 from src.attention_utils import extract_image_to_text_attention, num_attention_layers
-from src.reference_cache import ReferenceKVCache, scheduled_mask_ratio
+from src.reference_cache import ReferenceKVCache, ConditionKVCache
+from src.sparse_utils import expand_edit_mask_for_halo
 
 EXAMPLE_DOC_STRING = """
     Examples:
@@ -178,6 +179,8 @@ class Pipeline(DiffusionPipeline):
         sparse_target_halo: Optional[int] = None,
         use_reference_kv_cache: bool = True,
         reference_kv_cache_threshold: float = 0.3,
+        use_condition_kv_cache: Optional[bool] = None,
+        inference_shift: Optional[float] = None,
     ):
         """
         The call function to the pipeline for generation.
@@ -185,19 +188,31 @@ class Pipeline(DiffusionPipeline):
         Args:
             sparse_target (`bool`, *optional*):
                 Gather edit-mask target tokens plus halo after the stem. This enables
-                edit-only diffusion and preserves source tokens outside the edit mask.
+                edit-only diffusion and preserves source tokens outside the generation mask.
+                For supervise_target_halo checkpoints the generation mask includes halo.
                 Defaults to the checkpoint setting when an edit mask is provided.
             sparse_target_halo (`int`, *optional*):
-                Halo radius on the Transformer grid (default: checkpoint setting, normally 1).
+                Halo radius on the Transformer grid (default: checkpoint setting).
+            inference_shift (`float`, *optional*):
+                Positive rational shift s*r/(1+(s-1)*r) of the inference mask
+                schedule. Defaults to the scheduler config (1.0 = unshifted).
+                Values above 1 retain more masks at each intermediate step.
+                Remasking, model noise conditioning and cache capture share it.
             use_reference_kv_cache (`bool`, *optional*, defaults to `True`):
                 Capture full per-layer reference K/V once at the low-noise
                 transition, then pass only text and target through the model.
                 The cache is local to this generation and never stores target K/V.
             reference_kv_cache_threshold (`float`, *optional*, defaults to `0.3`):
                 Start capture when the scheduled remaining editable mask fraction
-                is at most this value (0..1). This uses the cosine/linear masking
+                is at most this value (0..1). This uses the shifted cosine/linear
                 schedule before each forward, without reading GPU token counts.
                 Higher thresholds reuse more steps. Zero disables reuse.
+                Cache-conditioned checkpoints cannot capture before their saved
+                low-noise threshold; smaller values may delay cache capture.
+            use_condition_kv_cache (`bool`, *optional*):
+                Cache both text and complete reference for cache_conditioning
+                checkpoints. Defaults to use_reference_kv_cache for those models.
+                False disables reuse while retaining trained masks/modulation.
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide image generation. If not defined, you need to pass `prompt_embeds`.
             height (`int`, *optional*, defaults to `self.transformer.config.sample_size * self.vae_scale_factor`):
@@ -286,6 +301,11 @@ class Pipeline(DiffusionPipeline):
             raise ValueError("sparse_target_halo must be a non-negative integer")
         if not 0.0 <= reference_kv_cache_threshold <= 1.0:
             raise ValueError("reference_kv_cache_threshold must be between 0 and 1")
+        cache_conditioning = self.transformer.config.cache_conditioning
+        if use_condition_kv_cache and not cache_conditioning:
+            raise ValueError("Joint text/reference caching requires a cache_conditioning checkpoint")
+        use_condition_kv_cache = (cache_conditioning and use_reference_kv_cache
+                                  if use_condition_kv_cache is None else use_condition_kv_cache)
 
         if (prompt_embeds is not None and encoder_hidden_states is None) or (
             prompt_embeds is None and encoder_hidden_states is not None
@@ -372,11 +392,25 @@ class Pipeline(DiffusionPipeline):
         micro_conds = micro_conds.unsqueeze(0)
         micro_conds = micro_conds.expand(2 * batch_size if guidance_scale > 1.0 else batch_size, -1)
 
-        self.scheduler.set_timesteps(num_inference_steps, temperature, self._execution_device)
+        self.scheduler.set_timesteps(
+            num_inference_steps, temperature, self._execution_device, inference_shift=inference_shift,
+        )
+        mask_ratios = self.scheduler.mask_ratios
+        self.last_inference_schedule_info = {
+            "inference_shift": self.scheduler.inference_shift,
+            "masking_schedule": self.scheduler.config.masking_schedule,
+            "mask_ratios": list(mask_ratios),  # N forwards plus the terminal clean state
+            "time_conditioning": self.transformer.config.time_conditioning,
+            "legacy_conditioning_timesteps": (
+                list(self.scheduler.conditioning_timesteps)
+                if self.transformer.config.time_conditioning == "legacy" else None
+            ),
+        }
 
         starting_mask_ratio = 1.0
 
         token_edit_mask = None
+        target_region_mask = None
         if mask_image is not None:
             token_edit_mask = self.mask_processor.preprocess(
                 mask_image, height // self.vae_scale_factor, width // self.vae_scale_factor
@@ -416,6 +450,15 @@ class Pipeline(DiffusionPipeline):
                         f"Mask token grid {tuple(token_edit_mask.shape)} does not match "
                         f"source token grid {tuple(latents.shape)}"
                     )
+                target_region_mask = token_edit_mask
+                if sparse_target and self.transformer.config.supervise_target_halo:
+                    grid_size = (tuple(size // 2 for size in latents.shape[-2:])
+                                 if self.transformer.down_block.downsample is not None else tuple(latents.shape[-2:]))
+                    halo = (self.transformer.config.sparse_target_halo
+                            if sparse_target_halo is None else sparse_target_halo)
+                    token_edit_mask = expand_edit_mask_for_halo(
+                        target_region_mask, tuple(latents.shape[-2:]), grid_size, halo,
+                    )
                 latents[token_edit_mask] = self.scheduler.config.mask_token_id
                 starting_mask_ratio = token_edit_mask.float().mean()
             
@@ -431,7 +474,7 @@ class Pipeline(DiffusionPipeline):
         intermediate_latents = {}
         # Static IDs/masks and the full CFG reference input are prepared once.
         # Cached forwards omit this reference input entirely; source VQ tokens
-        # stay available to the sampler for preservation outside the edit mask.
+        # stay available to the sampler for preservation outside the generation mask.
         img_ids = _prepare_latent_image_ids(
             latents.shape[-2], latents.shape[-1], latents.device, latents.dtype,
             up_sample=self.transformer.down_block.downsample is None,
@@ -441,7 +484,9 @@ class Pipeline(DiffusionPipeline):
         txt_ids = torch.zeros(text_length, 3, device=encoder_hidden_states.device, dtype=encoder_hidden_states.dtype)
         model_edit_mask = None
         if sparse_target:
-            model_edit_mask = torch.cat([token_edit_mask] * 2) if guidance_scale > 1.0 else token_edit_mask
+            # Gather uses the original ROI and adds its halo exactly once;
+            # the sampler uses the expanded generation mask when trained so.
+            model_edit_mask = torch.cat([target_region_mask] * 2) if guidance_scale > 1.0 else target_region_mask
         reference_input, reference_image_ids = None, None
         if reference_image is not None:
             reference_input = (torch.cat([reference_image_hidden_states] * 2)
@@ -452,21 +497,47 @@ class Pipeline(DiffusionPipeline):
             )
 
         reference_kv_cache = None
+        condition_kv_cache = None
         cache_capture_step = None
-        if use_reference_kv_cache and reference_image is not None and reference_kv_cache_threshold > 0:
+        capture_threshold = (min(reference_kv_cache_threshold, self.transformer.config.condition_cache_threshold)
+                             if cache_conditioning else reference_kv_cache_threshold)
+        # Attention/local-guidance reports require live text queries. Recompute
+        # the correctly masked prefix for these calls, instead of fabricating
+        # attention maps for query rows absent from a cache-only forward.
+        live_text_queries = (return_attention or self.local_guidance > 0 or return_target_step_images is not None
+                             or any(getattr(p, "capture_attention", False)
+                                    for p in self.transformer.attn_processors.values()))
+        cache_enabled = ((use_condition_kv_cache and not live_text_queries) if cache_conditioning
+                         else use_reference_kv_cache)
+        if cache_enabled and reference_image is not None and capture_threshold > 0:
             # Never spend memory capturing a cache if no later step can reuse it.
             cache_capture_step = next((
                 step for step in range(max(0, len(self.scheduler.timesteps) - 1))
-                if scheduled_mask_ratio(step, len(self.scheduler.timesteps), self.scheduler.config.masking_schedule)
-                <= reference_kv_cache_threshold
+                if mask_ratios[step] <= capture_threshold
             ), None)
             if cache_capture_step is not None:
-                reference_kv_cache = ReferenceKVCache()
+                if cache_conditioning:
+                    condition_kv_cache = ConditionKVCache()
+                else:
+                    reference_kv_cache = ReferenceKVCache()
         self.last_reference_cache_info = {
             "enabled": reference_kv_cache is not None,
+            "inference_shift": self.scheduler.inference_shift,
             "threshold": reference_kv_cache_threshold,
             "capture_step": cache_capture_step, "reuse_steps": [],
         }
+        self.last_condition_cache_info = {
+            "enabled": condition_kv_cache is not None,
+            "inference_shift": self.scheduler.inference_shift,
+            "trained_prefix_mask": cache_conditioning,
+            "phase_threshold": self.transformer.config.condition_cache_threshold if cache_conditioning else None,
+            "threshold": capture_threshold,
+            "capture_step": cache_capture_step if condition_kv_cache is not None else None,
+            "reuse_steps": [], "cached_branches": ["text", "reference"] if condition_kv_cache is not None else [],
+            "disabled_for_live_text_queries": bool(cache_conditioning and live_text_queries),
+        }
+        if condition_kv_cache is not None:
+            self.last_reference_cache_info = self.last_condition_cache_info
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             timesteps_iter = enumerate(self.scheduler.timesteps)
@@ -477,24 +548,43 @@ class Pipeline(DiffusionPipeline):
                 else:
                     model_input = latents
 
+                step_mask_ratio = mask_ratios[i]
+                # New checkpoints derive model time from step_mask_ratio.
+                # Legacy checkpoints retain their original units, evaluated at
+                # the equivalent position of the shifted noise level.
+                model_timestep = None
+                if self.transformer.config.time_conditioning == "legacy":
+                    model_timestep = torch.full(
+                        (model_input.shape[0],), self.scheduler.conditioning_timesteps[i],
+                        device=model_input.device,
+                        dtype=torch.long if self.scheduler.inference_shift == 1.0 else torch.float32,
+                    )
+
                 # image edit
                 if reference_image is not None:
                     step_cache = (reference_kv_cache if cache_capture_step is not None
                                   and i >= cache_capture_step else None)
+                    step_condition_cache = (condition_kv_cache if cache_capture_step is not None
+                                            and i >= cache_capture_step else None)
                     reuse_reference = step_cache is not None and step_cache.ready
+                    reuse_condition = step_condition_cache is not None and step_condition_cache.ready
                     if reuse_reference:
                         self.last_reference_cache_info["reuse_steps"].append(i)
+                    if reuse_condition:
+                        self.last_condition_cache_info["reuse_steps"].append(i)
                     model_output = self.transformer(
                         hidden_states = model_input,
                         micro_conds=micro_conds,
                         pooled_projections=prompt_embeds,
-                        encoder_hidden_states=encoder_hidden_states,
+                        encoder_hidden_states=None if reuse_condition else encoder_hidden_states,
                         img_ids = img_ids,
-                        txt_ids = txt_ids,
-                        timestep = torch.tensor([timestep]*model_input.shape[0], device=model_input.device, dtype=torch.long),
-                        reference_image_hidden_states=None if reuse_reference else reference_input,
-                        reference_image_ids=None if reuse_reference else reference_image_ids,
+                        txt_ids = None if reuse_condition else txt_ids,
+                        timestep=model_timestep,
+                        reference_image_hidden_states=None if (reuse_reference or reuse_condition) else reference_input,
+                        reference_image_ids=None if (reuse_reference or reuse_condition) else reference_image_ids,
                         reference_kv_cache=step_cache,
+                        condition_kv_cache=step_condition_cache,
+                        mask_ratio=step_mask_ratio,
                         joint_attention_kwargs={"scale": lora_scale},
                         lora_part_enable=lora_part_enable,
                         sparse_target=sparse_target,
@@ -506,6 +596,12 @@ class Pipeline(DiffusionPipeline):
                             "reference_length": step_cache.reference_length,
                             "num_layers": step_cache.num_layers,
                         })
+                    if step_condition_cache is not None and not reuse_condition:
+                        self.last_condition_cache_info.update({
+                            "text_length": step_condition_cache.text_length,
+                            "reference_length": step_condition_cache.reference_length,
+                            "num_layers": step_condition_cache.num_layers,
+                        })
                 else:
                     # text to image
                     model_output = self.transformer(
@@ -515,8 +611,9 @@ class Pipeline(DiffusionPipeline):
                         encoder_hidden_states=encoder_hidden_states,
                         img_ids = img_ids,
                         txt_ids = txt_ids,
-                        timestep = torch.tensor([timestep]*model_input.shape[0], device=model_input.device, dtype=torch.long),
+                        timestep=model_timestep,
                         sparse_target=False,
+                        mask_ratio=step_mask_ratio,
                     )
 
                 if guidance_scale > 1.0:
@@ -583,6 +680,8 @@ class Pipeline(DiffusionPipeline):
         # never own the cache, so it cannot leak into the next request or training.
         if reference_kv_cache is not None:
             reference_kv_cache.clear()
+        if condition_kv_cache is not None:
+            condition_kv_cache.clear()
 
         if output_type == "latent":
             output = latents

@@ -1,8 +1,11 @@
-"""Per-generation, full-reference KV snapshots for low-noise inference."""
+"""Per-generation reference snapshots and cache-consistent text/reference KV."""
 
 from typing import Dict, Sequence, Tuple
 
 import torch
+
+# Keep this import available for callers of the original cache-local helper.
+from src.mask_schedule import scheduled_mask_ratio
 
 
 class ReferenceKVCache:
@@ -59,19 +62,71 @@ class ReferenceKVCache:
         self.ready = False
 
 
-def scheduled_mask_ratio(step: int, num_steps: int, schedule: str) -> float:
-    """Scheduled unresolved fraction BEFORE a model forward (no GPU sync).
+class ConditionKVCache:
+    """Full text/reference K/V for the low-noise, target-independent prefix.
 
-    Step zero starts fully masked. Step i receives the sample produced by
-    scheduler step i-1, whose mask schedule uses i / num_steps. The ratio is
-    relative to editable tokens, rather than the area of the entire image.
-    Rounding and the scheduler's minimum-one-token rule can change actual counts.
+    A complete low-noise forward prefills every layer. Subsequent forwards omit
+    both context branches, including their queries, normalization and FFNs.
+    Keys are stored after QK normalization and RoPE. CFG halves stay separate.
+    This object belongs to one generation; target tensors are never retained.
     """
-    import math
 
-    progress = step / num_steps
-    if schedule == "cosine":
-        return math.cos(progress * math.pi / 2)
-    if schedule == "linear":
-        return 1.0 - progress
-    raise ValueError(f"Unknown masking schedule {schedule}")
+    def __init__(self):
+        self._layers = {}
+        self.text_length = 0
+        self.reference_length = 0
+        self.pooled_projections = None
+        self.ready = False
+
+    def store(self, layer, text_key, text_value, reference_key, reference_value):
+        if self.ready or layer is None or layer in self._layers:
+            raise ValueError("Condition cache capture requires a fresh, unique layer entry")
+        pairs = ((text_key, text_value), (reference_key, reference_value))
+        for key, value in pairs:
+            if key.ndim != 4 or key.shape != value.shape or key.shape[2] == 0:
+                raise ValueError("Condition K/V must contain complete nonempty [B,H,N,D] sequences")
+        if (text_key.shape[0], text_key.shape[1], text_key.shape[3]) != (
+            reference_key.shape[0], reference_key.shape[1], reference_key.shape[3]
+        ):
+            raise ValueError("Text and reference K/V dimensions differ")
+        if self._layers and (text_key.shape[2], reference_key.shape[2]) != (
+            self.text_length, self.reference_length
+        ):
+            raise ValueError("All layers must cache the same complete text/reference sequences")
+        self.text_length, self.reference_length = text_key.shape[2], reference_key.shape[2]
+        # Text slices come from concatenated [text,target] storage. Clone them
+        # so retaining the cache cannot retain target K/V through a tensor view.
+        self._layers[layer] = (
+            text_key.detach().clone(), text_value.detach().clone(),
+            reference_key.detach(), reference_value.detach(),
+        )
+
+    def freeze(self, expected_layers):
+        if not expected_layers or set(self._layers) != set(expected_layers):
+            raise ValueError("Condition cache is missing Transformer layers")
+        if self.pooled_projections is None:
+            raise ValueError("Condition cache is missing static pooled conditioning")
+        self.ready = True
+
+    def get(self, layer, query):
+        if not self.ready or layer not in self._layers:
+            raise ValueError("Prefill the complete condition cache before reuse")
+        tensors = self._layers[layer]
+        for tensor in tensors:
+            if (tensor.shape[0], tensor.shape[1], tensor.shape[3]) != (
+                query.shape[0], query.shape[1], query.shape[3]
+            ) or tensor.device != query.device or tensor.dtype != query.dtype:
+                raise ValueError("Condition cache and target query batch/head/device/dtype differ")
+        return tensors
+
+    @property
+    def num_layers(self):
+        return len(self._layers)
+
+    def clear(self):
+        self._layers.clear()
+        self.text_length = self.reference_length = 0
+        self.pooled_projections = None
+        self.ready = False
+
+

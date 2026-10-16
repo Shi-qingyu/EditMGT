@@ -7,6 +7,7 @@ from termcolor import cprint
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.utils import BaseOutput
 from diffusers.schedulers.scheduling_utils import SchedulerMixin
+from src.mask_schedule import scheduled_mask_ratio, legacy_timestep_for_mask_ratio, validate_inference_shift
 
 def gumbel_noise(t, generator=None):
     device = generator.device if generator is not None else t.device
@@ -69,9 +70,14 @@ class Scheduler(SchedulerMixin, ConfigMixin):
         self,
         mask_token_id: int,
         masking_schedule: str = "cosine",
+        inference_shift: float = 1.0,
     ):
+        self.inference_shift = validate_inference_shift(inference_shift)
         self.temperatures = None
         self.timesteps = None
+        self.mask_ratios = None
+        self.conditioning_timesteps = None
+        self._mask_ratios_tensor = None
         # for visualization the mask selected in each step
         self.mask_selected = None
         
@@ -80,8 +86,38 @@ class Scheduler(SchedulerMixin, ConfigMixin):
         num_inference_steps: int,
         temperature: Union[int, Tuple[int, int], List[int]] = (2, 0),
         device: Union[str, torch.device] = None,
+        inference_shift: Optional[float] = None,
     ):
+        if num_inference_steps < 1:
+            raise ValueError("num_inference_steps must be positive")
+        # A per-call override does not mutate the saved scheduler default.
+        self.inference_shift = validate_inference_shift(
+            self.config.inference_shift if inference_shift is None else inference_shift
+        )
         self.timesteps = torch.arange(num_inference_steps, device=device).flip(0)
+        self.mask_ratios = tuple(
+            scheduled_mask_ratio(i, num_inference_steps, self.config.masking_schedule, self.inference_shift)
+            for i in range(num_inference_steps + 1)
+        )
+        if self.inference_shift == 1.0:
+            # Preserve the original float32 cosine arithmetic before floor()
+            # converts ratios to token counts, including values near integers.
+            progress = torch.arange(num_inference_steps + 1, device=device) / num_inference_steps
+            self._mask_ratios_tensor = (
+                torch.cos(progress * math.pi / 2) if self.config.masking_schedule == "cosine" else 1 - progress
+            )
+            self._mask_ratios_tensor[0] = 1.0
+            self._mask_ratios_tensor[-1] = 0.0
+        else:
+            self._mask_ratios_tensor = torch.tensor(self.mask_ratios, device=device, dtype=torch.float32)
+        # Keep exact historical integer time values for the identity shift.
+        # Shifted legacy models receive fractional positions in the same units;
+        # normalized models use mask_ratios directly inside the Transformer.
+        self.conditioning_timesteps = (
+            tuple(range(num_inference_steps - 1, -1, -1)) if self.inference_shift == 1.0 else
+            tuple(legacy_timestep_for_mask_ratio(r, num_inference_steps, self.config.masking_schedule)
+                  for r in self.mask_ratios[:-1])
+        )
 
         if isinstance(temperature, (tuple, list)):
             self.temperatures = torch.linspace(temperature[0], temperature[1], num_inference_steps, device=device)
@@ -150,14 +186,8 @@ class Scheduler(SchedulerMixin, ConfigMixin):
         else:
             seq_len = sample.shape[1]
             step_idx = (self.timesteps == timestep).nonzero()
-            ratio = (step_idx + 1) / len(self.timesteps)
-
-            if self.config.masking_schedule == "cosine":
-                mask_ratio = torch.cos(ratio * math.pi / 2)
-            elif self.config.masking_schedule == "linear":
-                mask_ratio = 1 - ratio
-            else:
-                raise ValueError(f"unknown masking schedule {self.config.masking_schedule}")
+            # Forward i sees r[i], and its output is remasked to r[i+1].
+            mask_ratio = self._mask_ratios_tensor[step_idx + 1]
 
             if edit_mask is None:
                 mask_ratio = starting_mask_ratio * mask_ratio
@@ -203,14 +233,7 @@ class Scheduler(SchedulerMixin, ConfigMixin):
 
     def add_noise(self, sample, timesteps, generator=None):
         step_idx = (self.timesteps == timesteps).nonzero()
-        ratio = (step_idx + 1) / len(self.timesteps)
-
-        if self.config.masking_schedule == "cosine":
-            mask_ratio = torch.cos(ratio * math.pi / 2)
-        elif self.config.masking_schedule == "linear":
-            mask_ratio = 1 - ratio
-        else:
-            raise ValueError(f"unknown masking schedule {self.config.masking_schedule}")
+        mask_ratio = self._mask_ratios_tensor[step_idx + 1].to(sample.device)
 
         # By generating random values ​​on the current sample and comparing them with mask_ratio, 
         #   we can determine which positions will be masked.

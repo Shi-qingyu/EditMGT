@@ -1,4 +1,4 @@
-"""Run the original EditMGT on the fixed training-preview cases, without masks."""
+"""Run the original EditMGT on the fixed preview cases with English prompts and no masks."""
 import argparse
 import html
 import json
@@ -13,21 +13,33 @@ from src.v2_model import negative_prompt
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+# Translate the editing instruction, preserving literal text that must appear in the image.
+ENGLISH_INSTRUCTIONS = {
+    "替换为手动变速杆": "Replace it with a manual gear shift lever.",
+    "在新娘手上添加一束精致的鲜花": "Add a delicate bouquet of flowers to the bride's hands.",
+    "将其改为“京A88888”": 'Change it to "京A88888".',
+    "替换为光滑的大理石纹理": "Replace it with a smooth marble texture.",
+    "移除": "Remove it.",
+}
 
 
 def parse_args():
+    from src.mask_schedule import validate_inference_shift
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-path", default=str(PROJECT_ROOT / "checkpoint/EditMGT"),
                         help="Original EditMGT checkpoint containing the editmgt subfolder.")
     parser.add_argument(
         "--samples-manifest", type=Path,
         default=PROJECT_ROOT / "runs/editmgt_sparse_inter_edit/validation/samples.json",
-        help="Reuse the exact preview sources and instructions listed in this manifest.",
+        help="Reuse preview sources and translate the five known instructions into English.",
     )
-    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "outputs/inter_edit_vanilla")
+    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "outputs/inter_edit_vanilla_en")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--resolution", type=int, default=1024)
     parser.add_argument("--num-inference-steps", type=int, default=36)
+    parser.add_argument("--inference-shift", type=validate_inference_shift, default=1.0,
+                        help="Positive inference mask-schedule shift; 1 keeps the unshifted schedule.")
     parser.add_argument("--guidance-scale", type=float, default=6.0)
     parser.add_argument("--reference-strength", type=float, default=1.1)
     parser.add_argument("--seed", type=int, default=42, help="Each case uses seed + sample_id, as in validation.")
@@ -36,12 +48,22 @@ def parse_args():
 
 
 def load_cases(manifest_path, resolution):
-    """Read only exported source/GT PNGs and instructions; never open a mask."""
+    """Read exported source/GT PNGs, using English instructions; never open a mask."""
     rows = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not rows:
         raise ValueError(f"No cases in {manifest_path}")
     cases = []
     for row in rows:
+        original_instruction = row["instruction"]
+        instruction = row.get("instruction_en") or ENGLISH_INSTRUCTIONS.get(original_instruction)
+        if instruction is None:
+            if row.get("language") in ("en", "English", "英文"):
+                instruction = original_instruction
+            else:
+                raise ValueError(
+                    f"No English translation for sample {row['sample_id']}; "
+                    "add an instruction_en field to its manifest entry."
+                )
         input_dir = manifest_path.parent / row["input_dir"]
         images = {}
         for name in ("source", "target"):
@@ -51,8 +73,9 @@ def load_cases(manifest_path, resolution):
                 )
         cases.append({
             "test_index": row["test_index"], "sample_id": int(row["sample_id"]),
-            "instruction": row["instruction"], "edit_type": row["edit_type"],
-            "language": row.get("language"), "input_dir": str(input_dir.resolve()),
+            "instruction": instruction, "original_instruction": original_instruction,
+            "edit_type": row["edit_type"], "language": "en",
+            "original_language": row.get("language"), "input_dir": str(input_dir.resolve()),
             **images,
         })
     return cases
@@ -87,14 +110,16 @@ def save_report(output_dir, records, panels, settings):
         )
         sections.append(
             f'<section><h2>Sample {record["sample_id"]} · {html.escape(record["edit_type"])}</h2>'
-            f'<p>{html.escape(record["instruction"])}</p><p>Seed: {record["seed"]}</p>'
+            f'<p>Original instruction: {html.escape(record["original_instruction"])}</p>'
+            f'<p>English prompt used: {html.escape(record["instruction"])}</p>'
+            f'<p>Seed: {record["seed"]}</p>'
             f'<div class="images">{figures}</div></section>'
         )
     style = "body{font-family:sans-serif;margin:24px}.images{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}figure{margin:0}img{width:100%}"
     (output_dir / "index.html").write_text(
         '<!doctype html><meta charset="utf-8"><title>Vanilla EditMGT · Inter-Edit test</title>'
         f'<style>{style}</style><h1>Vanilla EditMGT · Inter-Edit test</h1>'
-        '<p>Inputs: source image and original instruction. Ground truth is for display only.</p>'
+        '<p>Inputs: source image and English instruction. Ground truth is for display only.</p>'
         + "".join(sections), encoding="utf-8",
     )
     (output_dir / "metadata.json").write_text(
@@ -126,6 +151,7 @@ def main(args):
             prompt=[case["instruction"]],
             height=args.resolution, width=args.resolution,
             num_inference_steps=args.num_inference_steps,
+            inference_shift=args.inference_shift,
             guidance_scale=args.guidance_scale,
             reference_strength=args.reference_strength,
             reference_image=[case["source"]],
@@ -149,8 +175,11 @@ def main(args):
         "model_path": args.model_path, "transformer_subfolder": "editmgt", "split": "test",
         "samples_manifest": str(args.samples_manifest.resolve()),
         "resolution": args.resolution, "num_inference_steps": args.num_inference_steps,
+        "inference_shift": pipe.scheduler.inference_shift,
+        "inference_schedule": getattr(pipe, "last_inference_schedule_info", None),
         "guidance_scale": args.guidance_scale, "reference_strength": args.reference_strength,
         "negative_prompt": negative_prompt, "seed": args.seed, "bf16": args.bf16,
+        "prompt_language": "en",
         "mask_input": False, "edit_only_diffusion": False, "sparse_target": False,
         "token_type_rope": False, "use_reference_kv_cache": False,
         "seconds": time.perf_counter() - started,

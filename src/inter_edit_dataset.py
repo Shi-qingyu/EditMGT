@@ -7,9 +7,10 @@ import json
 import logging
 import os
 import random
+import re
 import tarfile
 import tempfile
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from pathlib import Path
 
 import torch
@@ -22,6 +23,35 @@ from src.dataset_utils import process_edit_sample, tokenize_prompt
 DEFAULT_INTER_EDIT_ROOT = "/mnt/geminihzceph/public/data/Inter-Edit"
 DEFAULT_INTER_EDIT_CACHE = Path(__file__).resolve().parents[1] / "data" / "inter_edit_tar_index"
 logger = logging.getLogger(__name__)
+INTER_EDIT_LANGUAGES = ("all", "en", "zh")
+_HAN_CHARACTERS = re.compile("[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U000323af]")
+_ENGLISH_LETTERS = re.compile("[A-Za-z]")
+
+
+def inter_edit_prompt_language(row):
+    """Use official labels when present, otherwise classify the released en/zh instructions.
+
+    Train metadata has no language field: any Han character makes an instruction
+    Chinese; English requires a Latin letter and no Han characters. Official
+    English test instructions can contain literal Chinese text to render.
+    """
+    instruction = row.get("instruction")
+    if not isinstance(instruction, str) or not instruction.strip():
+        return "other"
+    label = str(row.get("language", "")).strip().lower()
+    if label in ("en", "english", "英文"):
+        return "en"
+    if label in ("zh", "chinese", "中文", "zh-cn", "zh-hans"):
+        return "zh"
+    if _HAN_CHARACTERS.search(instruction):
+        return "zh"
+    return "en" if _ENGLISH_LETTERS.search(instruction) else "other"
+
+
+def matches_inter_edit_language(row, language="all"):
+    if language not in INTER_EDIT_LANGUAGES:
+        raise ValueError(f"Unsupported Inter-Edit language filter: {language!r}")
+    return language == "all" or inter_edit_prompt_language(row) == language
 
 
 class TarAssetReader:
@@ -145,6 +175,38 @@ class InterEditReader:
         with gzip.open(path, "rt", encoding="utf-8") as handle:
             return [json.loads(line) for line in handle if line.strip()]
 
+    def count_metadata_languages(self, path):
+        """Cache per-shard counts so filtered __len__ needs no image reads.
+
+        Counts are shared across ranks/runs and invalidated when metadata changes.
+        Only the small JSONL metadata is scanned on the first filtered run.
+        """
+        path = Path(path)
+        stat = path.stat()
+        identity = f"prompt-language-v1:{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
+        digest = hashlib.sha256(identity.encode()).hexdigest()[:24]
+        cache_root = (Path(self.cache_dir) if self.cache_dir is not None
+                      else DEFAULT_INTER_EDIT_CACHE) / "language_counts"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_root / f"{path.name}-{digest}.json"
+        with cache_path.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if cache_path.is_file():
+                return json.loads(cache_path.read_text(encoding="utf-8"))
+            rows = self.read_metadata(path)
+            counts = Counter(inter_edit_prompt_language(row) for row in rows)
+            counts["all"] = len(rows)
+            temporary_path = None
+            try:
+                with tempfile.NamedTemporaryFile("w", dir=cache_root, suffix=".tmp", delete=False) as temporary:
+                    temporary_path = Path(temporary.name)
+                    json.dump(dict(counts), temporary)
+                os.replace(temporary_path, cache_path)
+            finally:
+                if temporary_path is not None and temporary_path.exists():
+                    temporary_path.unlink()
+            return dict(counts)
+
     def read_sample(self, row, assets):
         if self.split == "train":
             source = assets.image(row["source_archive"], row["source_file"])
@@ -189,19 +251,23 @@ class InterEditDataset(IterableDataset):
 
     The training entry point leaves this loader out of Accelerator.prepare:
     this class already distributes data, and all tensors are moved explicitly.
-    Empty-mask annotations are filtered during iteration. __len__ reports the
-    nominal metadata count before filtering; repeated training stops by steps.
+    Language filtering happens before asset reads. __len__ reports the selected
+    language's metadata count before empty-mask filtering; training stops by steps.
     """
 
     def __init__(
         self, root_dir=DEFAULT_INTER_EDIT_ROOT, split="train", tokenizer=None,
         size=1024, text_encoder_architecture="CLIP", norm=False,
         rank=0, world_size=1, shuffle=True, repeat=True, cache_dir=None, seed=42,
+        language="all",
     ):
         super().__init__()
         if world_size < 1 or not 0 <= rank < world_size:
             raise ValueError("Inter-Edit rank must be in [0,world_size)")
+        if language not in INTER_EDIT_LANGUAGES:
+            raise ValueError(f"Unsupported Inter-Edit language filter: {language!r}")
         self.reader = InterEditReader(root_dir, split, cache_dir)
+        self.language = language
         self.tokenizer, self.size = tokenizer, size
         self.text_encoder_architecture, self.norm = text_encoder_architecture, norm
         self.rank, self.world_size = rank, world_size
@@ -214,9 +280,17 @@ class InterEditDataset(IterableDataset):
             self.num_samples = sum(min(self.reader.samples_per_shard,
                                        self.reader.num_samples - index * self.reader.samples_per_shard)
                                    for index in shard_ids)
+            if language != "all":
+                counts = {path: self.reader.count_metadata_languages(path).get(language, 0)
+                          for path in self.metadata_files}
+                self.metadata_files = [path for path in self.metadata_files if counts[path] > 0]
+                self.num_samples = sum(counts.values())
         else:
             self.metadata_files = self.reader.metadata_files
-            self.num_samples = len(self.reader.test_rows[rank::world_size])
+            self.num_samples = sum(matches_inter_edit_language(row, language)
+                                   for row in self.reader.test_rows[rank::world_size])
+        if self.num_samples == 0:
+            raise ValueError(f"No Inter-Edit {split} samples match language={language!r} on rank={rank}")
 
     def __len__(self):
         return self.num_samples
@@ -243,6 +317,7 @@ class InterEditDataset(IterableDataset):
         record = {
             "sample_id": raw["sample_id"], "rank": self.rank, "worker_id": worker_id,
             "reason": "empty_edit_mask", "data_root": str(self.reader.root),
+            "language_filter": self.language,
             "edit_type": raw.get("edit_type"),
             "mask_archive": raw.get("asset_archive", "masks.tar"),
             "mask_file": raw.get("mask_file", raw.get("mask_path")),
@@ -272,6 +347,8 @@ class InterEditDataset(IterableDataset):
                         rows = rows[self.rank::self.world_size][worker_id::worker_count]
                     else:
                         rows = list(rows)
+                    if self.language != "all":
+                        rows = [row for row in rows if matches_inter_edit_language(row, self.language)]
                     if self.shuffle:
                         rng.shuffle(rows)
                     for row in rows:
@@ -299,6 +376,7 @@ class InterEditDataset(IterableDataset):
                 if not yielded:
                     raise ValueError(
                         f"No valid Inter-Edit samples remain for rank={self.rank}, worker={worker_id}; "
+                        f"language={self.language!r}; "
                         f"{len(empty_sample_ids)} empty-mask samples were excluded. "
                         "Check the assigned annotation shards instead of repeating an empty stream."
                     )

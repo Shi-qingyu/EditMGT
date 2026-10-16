@@ -6,6 +6,46 @@ import torch
 import torch.nn.functional as F
 
 
+def _active_target_mask(edit_mask: torch.Tensor, grid_size: Tuple[int, int], halo: int):
+    """Shared OR projection and dilation for attention and supervision."""
+    if not isinstance(halo, int) or halo < 0:
+        raise ValueError("sparse_target_halo must be a non-negative integer")
+    active = F.adaptive_max_pool2d(edit_mask[:, None].float(), grid_size)
+    if halo:
+        active = F.max_pool2d(active, 2 * halo + 1, stride=1, padding=halo)
+    return active[:, 0].bool()
+
+
+def expand_edit_mask_for_halo(
+    edit_mask: torch.Tensor,
+    input_grid_size: Tuple[int, int],
+    grid_size: Tuple[int, int],
+    halo: int,
+) -> torch.Tensor:
+    """Expand active Transformer cells back to their covered VQ tokens.
+
+    The returned mask has the input shape. Use it for corruption, masked-token
+    CE and inference remasking. Keep the ORIGINAL mask for Transformer gather,
+    which performs the same dilation exactly once on its own grid.
+    """
+    if edit_mask.ndim == 2:
+        if edit_mask.shape[1] != input_grid_size[0] * input_grid_size[1]:
+            raise ValueError("Flattened edit mask must match the VQ grid")
+    elif edit_mask.ndim == 3 or (edit_mask.ndim == 4 and edit_mask.shape[1] == 1):
+        if tuple(edit_mask.shape[-2:]) != tuple(input_grid_size):
+            raise ValueError("Edit mask must match the VQ grid")
+    else:
+        raise ValueError("Edit mask must be [B,N], [B,H,W], or [B,1,H,W]")
+    if any(size < 1 for size in (*input_grid_size, *grid_size)) or any(
+        source % target for source, target in zip(input_grid_size, grid_size)
+    ):
+        raise ValueError("The VQ grid must be an integer multiple of the Transformer grid")
+    mask_grid = edit_mask.reshape(-1, *input_grid_size).bool()
+    active = _active_target_mask(mask_grid, grid_size, halo)
+    expanded = F.interpolate(active[:, None].float(), size=input_grid_size, mode="nearest")[:, 0].bool()
+    return expanded.reshape(edit_mask.shape)
+
+
 @dataclass
 class SparseTargetLayout:
     indices: torch.Tensor  # [B, max_active], original row-major grid indices
@@ -61,10 +101,7 @@ def prepare_sparse_target_layout(
     if edit_mask.shape[0] != batch_size:
         raise ValueError("target_edit_mask batch must match the target batch")
 
-    active = F.adaptive_max_pool2d(edit_mask[:, None].float(), grid_size)
-    if halo:
-        active = F.max_pool2d(active, 2 * halo + 1, stride=1, padding=halo)
-    active = active[:, 0].bool()
+    active = _active_target_mask(edit_mask, grid_size, halo)
     flat_active = active.flatten(1)
     counts = flat_active.sum(dim=1)
     max_active = int(counts.max().item())

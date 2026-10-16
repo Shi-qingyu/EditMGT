@@ -17,7 +17,7 @@ from diffusers.models.attention_processor import (
 )
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.normalization import AdaLayerNormZero, AdaLayerNormZeroSingle
-from diffusers.utils import USE_PEFT_BACKEND, is_torch_version, logging, scale_lora_layers, unscale_lora_layers
+from diffusers.utils import USE_PEFT_BACKEND, logging, scale_lora_layers, unscale_lora_layers
 from diffusers.utils.torch_utils import maybe_allow_in_graph
 from diffusers.models.embeddings import CombinedTimestepGuidanceTextProjEmbeddings, CombinedTimestepTextProjEmbeddings, FluxPosEmbed
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
@@ -29,7 +29,7 @@ from peft.utils import set_peft_model_state_dict
 from src.v2_utils import MLPProjector, LinearProjector, FusedMLPProjector, PerceiverResampler, ConFluxAttnProcessor2_0, enable_lora
 from src.dataset_utils import get_encode_hidden_state_len
 from src.sparse_utils import prepare_sparse_target_layout, prepare_branch_ids, batched_rotary_embedding
-from src.reference_cache import ReferenceKVCache
+from src.reference_cache import ReferenceKVCache, ConditionKVCache
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -53,7 +53,19 @@ def setup_lora_model(transformer, local_lora_dir):
     sparse_config_path = os.path.join(local_lora_dir, "sparse_target_config.json")
     if os.path.isfile(sparse_config_path):
         with open(sparse_config_path) as f:
-            transformer.enable_sparse_target(halo=json.load(f)["sparse_target_halo"])
+            sparse_config = json.load(f)
+        transformer.enable_sparse_target(
+            halo=sparse_config["sparse_target_halo"],
+            supervise_halo=sparse_config.get("supervise_target_halo", False),
+        )
+    condition_config_path = os.path.join(local_lora_dir, "condition_cache_config.json")
+    if os.path.isfile(condition_config_path):
+        with open(condition_config_path) as f:
+            transformer.enable_condition_cache_training(threshold=json.load(f)["condition_cache_threshold"])
+    time_config_path = os.path.join(local_lora_dir, "time_conditioning_config.json")
+    if os.path.isfile(time_config_path):
+        with open(time_config_path) as f:
+            transformer.set_time_conditioning(json.load(f)["time_conditioning"])
     config_path = os.path.join(local_lora_dir, "lora_config.json")
     with open(config_path, 'r') as f:
         config_dict = json.load(f)
@@ -113,10 +125,22 @@ class SingleTransformerBlock(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         reference_kv_cache: Optional[ReferenceKVCache] = None,
         reference_cache_key: Optional[str] = None,
+        text_temb: Optional[torch.Tensor] = None,
+        text_length: int = 0,
+        condition_prefix_mask: Optional[torch.Tensor] = None,
+        condition_kv_cache: Optional[ConditionKVCache] = None,
     ):
         residual = hidden_states  # torch.Size([2, 1280, 1024]) for either 1024 or 512
         with enable_lora((self.norm.linear, self.proj_mlp), not lora_part_enable):
-            norm_hidden_states, gate = self.norm(hidden_states, emb=temb)
+            if text_temb is not None and text_length:
+                norm_text, text_gate = self.norm(hidden_states[:, :text_length], emb=text_temb)
+                norm_target, target_gate = self.norm(hidden_states[:, text_length:], emb=temb)
+                norm_hidden_states = torch.cat((norm_text, norm_target), dim=1)
+                gate = torch.cat((text_gate[:, None].expand(-1, text_length, -1),
+                                  target_gate[:, None].expand(-1, hidden_states.shape[1] - text_length, -1)), dim=1)
+            else:
+                norm_hidden_states, gate = self.norm(hidden_states, emb=temb)
+                gate = gate.unsqueeze(1)
             mlp_hidden_states = self.act_mlp(self.proj_mlp(norm_hidden_states))
 
         if reference_image_hidden_states is not None:
@@ -132,6 +156,8 @@ class SingleTransformerBlock(nn.Module):
                 attention_mask=attention_mask,
                 reference_kv_cache=reference_kv_cache,
                 reference_cache_key=reference_cache_key,
+                condition_prefix_mask=condition_prefix_mask,
+                condition_kv_cache=condition_kv_cache,
             )
         else:
             attn_output = self.attn(
@@ -141,11 +167,12 @@ class SingleTransformerBlock(nn.Module):
                 lora_part_enable=lora_part_enable,
                 reference_kv_cache=reference_kv_cache,
                 reference_cache_key=reference_cache_key,
+                condition_prefix_mask=condition_prefix_mask,
+                condition_kv_cache=condition_kv_cache,
             )
 
         with enable_lora((self.proj_out,), not lora_part_enable):
             hidden_states = torch.cat([attn_output, mlp_hidden_states], dim=2)
-            gate = gate.unsqueeze(1)
             hidden_states = gate * self.proj_out(hidden_states)
             hidden_states = residual + hidden_states
         if hidden_states.dtype == torch.float16:
@@ -216,13 +243,19 @@ class TransformerBlock(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         reference_kv_cache: Optional[ReferenceKVCache] = None,
         reference_cache_key: Optional[str] = None,
+        text_temb: Optional[torch.Tensor] = None,
+        condition_prefix_mask: Optional[torch.Tensor] = None,
+        condition_kv_cache: Optional[ConditionKVCache] = None,
     ):
+        reuse_condition = condition_kv_cache is not None and condition_kv_cache.ready
         with enable_lora((self.norm1.linear,), not lora_part_enable):
             norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
 
-        norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(
-            encoder_hidden_states, emb=temb
-        )
+        norm_encoder_hidden_states = None
+        if not reuse_condition:
+            norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(
+                encoder_hidden_states, emb=temb if text_temb is None else text_temb
+            )
 
         # Attention.
         if reference_image_hidden_states is not None:
@@ -239,6 +272,14 @@ class TransformerBlock(nn.Module):
                 attention_mask=attention_mask,
                 reference_kv_cache=reference_kv_cache,
                 reference_cache_key=reference_cache_key,
+                condition_prefix_mask=condition_prefix_mask,
+                condition_kv_cache=condition_kv_cache,
+            )
+        elif reuse_condition:
+            attn_output = self.attn(
+                hidden_states=norm_hidden_states, image_rotary_emb=image_rotary_emb,
+                attention_mask=attention_mask, lora_part_enable=lora_part_enable,
+                reference_cache_key=reference_cache_key, condition_kv_cache=condition_kv_cache,
             )
         else:
             attn_output, context_attn_output = self.attn(
@@ -249,6 +290,8 @@ class TransformerBlock(nn.Module):
                 lora_part_enable=lora_part_enable,
                 reference_kv_cache=reference_kv_cache,
                 reference_cache_key=reference_cache_key,
+                condition_prefix_mask=condition_prefix_mask,
+                condition_kv_cache=condition_kv_cache,
             )
 
         # Process attention outputs for the `hidden_states`.
@@ -278,7 +321,7 @@ class TransformerBlock(nn.Module):
             reference_image_hidden_states = reference_image_hidden_states + reference_ff_output
 
         # Process attention outputs for the `encoder_hidden_states`.
-        if not self.is_last:
+        if not self.is_last and not reuse_condition:
             context_attn_output = c_gate_msa.unsqueeze(1) * context_attn_output
             encoder_hidden_states = encoder_hidden_states + context_attn_output
 
@@ -445,8 +488,16 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         sparse_target: bool = False,
         sparse_target_halo: int = 1,
         token_type_rope: bool = False,
+        cache_conditioning: bool = False,
+        condition_cache_threshold: float = 0.3,
+        time_conditioning: str = "legacy",
+        supervise_target_halo: bool = False,
     ):
         super().__init__()
+        if not 0.0 < condition_cache_threshold <= 1.0:
+            raise ValueError("condition_cache_threshold must be in (0,1]")
+        if time_conditioning not in ("legacy", "mask_ratio"):
+            raise ValueError("time_conditioning must be legacy or mask_ratio")
         self.out_channels = in_channels
         self.inner_dim = self.config.num_attention_heads * self.config.attention_head_dim # 64 * 16 = 1024 # 24 * 128 = 3072  # 6 * 128 = 768; 12 * 64 = 768
 
@@ -553,7 +604,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         self.sparse_shape_embed = TimestepEmbedding(2 * 256, self.inner_dim, sample_proj_bias=False)
         nn.init.zeros_(self.sparse_shape_embed.linear_2.weight)
 
-    def enable_sparse_target(self, halo: Optional[int] = None):
+    def enable_sparse_target(self, halo: Optional[int] = None, supervise_halo: Optional[bool] = None):
         """Upgrade a loaded dense checkpoint before creating the optimizer/LoRA."""
         halo = self.config.sparse_target_halo if halo is None else halo
         if not isinstance(halo, int) or halo < 0:
@@ -561,7 +612,22 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         if self.sparse_shape_embed is None:
             self._init_sparse_shape_embed()
             self.sparse_shape_embed.to(device=self.device, dtype=self.dtype)
-        self.register_to_config(sparse_target=True, sparse_target_halo=halo, token_type_rope=True)
+        self.register_to_config(
+            sparse_target=True, sparse_target_halo=halo, token_type_rope=True,
+            supervise_target_halo=(self.config.supervise_target_halo if supervise_halo is None else supervise_halo),
+        )
+
+    def enable_condition_cache_training(self, threshold: float = 0.3):
+        """Enable low-noise prefix isolation and fixed text/reference modulation."""
+        if not 0.0 < threshold <= 1.0:
+            raise ValueError("condition_cache_threshold must be in (0,1]")
+        self.register_to_config(cache_conditioning=True, condition_cache_threshold=threshold)
+
+    def set_time_conditioning(self, mode: str):
+        """Choose time units before training; old checkpoints default to legacy."""
+        if mode not in ("legacy", "mask_ratio"):
+            raise ValueError("time_conditioning must be legacy or mask_ratio")
+        self.register_to_config(time_conditioning=mode)
 
     def add_adapter(self, adapter_config, adapter_name: str = "default"):
         super().add_adapter(adapter_config, adapter_name=adapter_name)
@@ -723,6 +789,8 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         sparse_target: Optional[bool] = None,
         sparse_target_halo: Optional[int] = None,
         reference_kv_cache: Optional[ReferenceKVCache] = None,
+        condition_kv_cache: Optional[ConditionKVCache] = None,
+        mask_ratio: Optional[Union[float, torch.Tensor]] = None,
     ) -> Union[torch.FloatTensor, Transformer2DModelOutput]:
         """
         The [`FluxTransformer2DModel`] forward method.
@@ -748,6 +816,14 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                 In eval/no-grad mode, a fresh cache plus reference input captures
                 full per-layer reference K/V. A ready cache with no reference
                 input reuses these K/V and skips the reference branch entirely.
+            condition_kv_cache (`ConditionKVCache`, *optional*):
+                Joint text/full-reference cache for cache_conditioning checkpoints.
+                Ready caches require both context inputs to be omitted.
+            mask_ratio (`float` or `torch.Tensor`, *optional*):
+                Scheduled unresolved edit-token fraction, before this forward.
+                Required for cache_conditioning or time_conditioning="mask_ratio".
+                In mask_ratio mode this also replaces the legacy timestep argument,
+                using normalized noise in [0,1] before one internal x1000 scaling.
             block_controlnet_hidden_states: (`list` of `torch.Tensor`):
                 A list of tensors that if specified are added to the residuals of transformer blocks.
             joint_attention_kwargs (`dict`, *optional*):
@@ -763,8 +839,20 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
             `tuple` where the first element is the sample tensor.
         """
         sparse_target = self.config.sparse_target if sparse_target is None else sparse_target
+        cached_condition = condition_kv_cache is not None and condition_kv_cache.ready
         cached_reference = reference_kv_cache is not None and reference_kv_cache.ready
+        if condition_kv_cache is not None:
+            if not self.config.cache_conditioning:
+                raise ValueError("Joint condition caching requires a cache_conditioning checkpoint")
+            if self.training or torch.is_grad_enabled() or reference_kv_cache is not None:
+                raise ValueError("Condition caching requires eval/no-grad and no legacy reference cache")
+            if cached_condition and (encoder_hidden_states is not None or reference_image_hidden_states is not None):
+                raise ValueError("Omit text/reference hidden states when reusing the condition cache")
+            if not cached_condition and (encoder_hidden_states is None or reference_image_hidden_states is None):
+                raise ValueError("Condition cache prefill requires complete text and reference inputs")
         if reference_kv_cache is not None:
+            if self.config.cache_conditioning:
+                raise ValueError("cache_conditioning checkpoints use ConditionKVCache instead of legacy reference snapshots")
             if self.training or torch.is_grad_enabled():
                 raise ValueError("Reference KV caching requires model.eval() and no-grad inference")
             if cached_reference and reference_image_hidden_states is not None:
@@ -772,33 +860,69 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
             if not cached_reference and reference_image_hidden_states is None:
                 raise ValueError("An empty reference cache requires the full reference input for capture")
         if sparse_target and (target_edit_mask is None or (
-            reference_image_hidden_states is None and not cached_reference
+            reference_image_hidden_states is None and not (cached_reference or cached_condition)
         )):
             raise ValueError("Sparse target requires target_edit_mask and a full reference branch or KV cache")
         if sparse_target and self.sparse_shape_embed is None:
             raise ValueError("Call enable_sparse_target() before sparse-target inference/training")
+        condition_prefix_mask = None
+        if self.config.cache_conditioning:
+            if mask_ratio is None:
+                raise ValueError("cache_conditioning requires the scheduled mask_ratio in train and inference")
+            if isinstance(mask_ratio, (float, int)):
+                # Pipeline schedules are host scalars: no scalar transfer or
+                # GPU synchronization is needed on cache-only/high-noise steps.
+                low_noise = mask_ratio <= self.config.condition_cache_threshold
+                if condition_kv_cache is not None and not low_noise:
+                    raise ValueError("Condition K/V may only be captured/reused in the trained low-noise phase")
+                if low_noise and not cached_condition:
+                    condition_prefix_mask = torch.ones(hidden_states.shape[0], device=hidden_states.device,
+                                                       dtype=torch.bool)
+            else:
+                ratios = torch.as_tensor(mask_ratio, device=hidden_states.device, dtype=torch.float32).reshape(-1)
+                if ratios.numel() == 1:
+                    ratios = ratios.expand(hidden_states.shape[0])
+                if ratios.numel() != hidden_states.shape[0]:
+                    raise ValueError("mask_ratio must be scalar or contain one value per batch sample")
+                condition_prefix_mask = ratios <= self.config.condition_cache_threshold
+                if condition_kv_cache is not None and not bool(condition_prefix_mask.all()):
+                    raise ValueError("Condition K/V may only be captured/reused in the trained low-noise phase")
+        if self.config.time_conditioning == "mask_ratio":
+            if mask_ratio is None:
+                raise ValueError("mask_ratio time conditioning requires mask_ratio in train and inference")
+            # Resolve before the optional time-conditioned text connector too.
+            # Scheduler step IDs stay scheduler-only, independent of step count.
+            timestep = torch.as_tensor(mask_ratio, device=hidden_states.device, dtype=torch.float32).reshape(-1)
+            if timestep.numel() == 1:
+                timestep = timestep.expand(hidden_states.shape[0])
+            if timestep.numel() != hidden_states.shape[0]:
+                raise ValueError("mask_ratio must be scalar or contain one value per batch sample")
         input_grid_size = tuple(hidden_states.shape[-2:])
-        if self.connector_type is not None and self.connector_type != 'none':
+        if not cached_condition and self.connector_type is not None and self.connector_type != 'none':
             if self.connector_type == 'qformer':
-                timestep_emb = get_timestep_embedding(timestep.to(hidden_states.dtype) * 1000, self.inner_dim)
+                connector_time = timestep
+                if condition_prefix_mask is not None:
+                    connector_time = torch.where(condition_prefix_mask, torch.zeros_like(timestep), timestep)
+                # VQ inputs are still integer codes here; time coordinates can
+                # be fractional for normalized noise or shifted legacy steps.
+                connector_dtype = torch.float32
+                timestep_emb = get_timestep_embedding(connector_time.to(connector_dtype) * 1000, self.inner_dim)
                 encoder_hidden_states = self.connector(
                     encoder_hidden_states, timestep_embedding=timestep_emb.unsqueeze(dim=1)
                 )
             else:
                 encoder_hidden_states = self.connector(encoder_hidden_states.to(self.dtype))
         
-        micro_cond_encode_dim = 256 # same as self.config.micro_cond_encode_dim = 256 from amused
-        micro_cond_embeds = get_timestep_embedding(
-            micro_conds.flatten(), micro_cond_encode_dim, flip_sin_to_cos=True, downscale_freq_shift=0
-        ) # shape of micro_cond_embeds [10, 256]
-        micro_cond_embeds = micro_cond_embeds.reshape((hidden_states.shape[0], -1)) # shape of micro_cond_embeds [2, 1280]  
-
-        pooled_projections = torch.cat([pooled_projections, micro_cond_embeds], dim=1) # [2, 768] [2, 1280] -> [2, 2048] # [2, 1024] [2, 1280] -> [2, 2304]
-        pooled_projections = pooled_projections.to(dtype=self.dtype)
-        pooled_projections = self.cond_embed(pooled_projections).to(encoder_hidden_states.dtype)    
-
-        encoder_hidden_states = self.context_embedder(encoder_hidden_states) # 1024 -> 1024 
-        encoder_hidden_states = self.encoder_proj_layer_norm(encoder_hidden_states) # to figure out how many parameters here
+        if cached_condition:
+            pooled_projections = condition_kv_cache.pooled_projections
+        else:
+            micro_cond_embeds = get_timestep_embedding(
+                micro_conds.flatten(), 256, flip_sin_to_cos=True, downscale_freq_shift=0,
+            ).reshape(hidden_states.shape[0], -1)
+            pooled_projections = torch.cat([pooled_projections, micro_cond_embeds], dim=1).to(dtype=self.dtype)
+            pooled_projections = self.cond_embed(pooled_projections).to(encoder_hidden_states.dtype)
+            encoder_hidden_states = self.context_embedder(encoder_hidden_states)
+            encoder_hidden_states = self.encoder_proj_layer_norm(encoder_hidden_states)
 
         hidden_states = self.embed(hidden_states) # output will be [2,768,16,16] # [2, 1024, 16, 16] 
         hidden_states = self.down_block(hidden_states)
@@ -817,7 +941,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
             )
             full_target_hidden_states = hidden_states
             hidden_states = layout.gather(hidden_states)
-        if self.sparse_shape_embed is not None:
+        if self.sparse_shape_embed is not None and not cached_condition:
             target_shape = layout.shape if layout is not None else hidden_states.new_tensor(
                 [height, width]
             ).expand(batch_size, -1)
@@ -827,6 +951,8 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
             pooled_projections = pooled_projections + self.sparse_shape_embed(
                 shape_embeds.to(dtype=self.dtype)
             ).to(pooled_projections.dtype)
+        if condition_kv_cache is not None and not cached_condition:
+            condition_kv_cache.pooled_projections = pooled_projections.detach()
 
         if reference_image_hidden_states is not None:
             reference_image_hidden_states = self.embed(reference_image_hidden_states)
@@ -862,6 +988,14 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
             else self.time_text_embed(timestep, guidance, pooled_projections)
         ) # self.inner_dim -> self.config.pooled_projection_dim
 
+        text_temb = None
+        fixed_condition_temb = None
+        if condition_prefix_mask is not None and not cached_condition:
+            fixed_condition_temb = (
+                self.time_text_embed(torch.zeros_like(timestep), pooled_projections)
+                if guidance is None else self.time_text_embed(torch.zeros_like(timestep), guidance, pooled_projections)
+            )
+            text_temb = torch.where(condition_prefix_mask[:, None], fixed_condition_temb, temb)
         if reference_image_hidden_states is not None:
             reference_temb = (
                 self.time_text_embed(torch.ones_like(timestep) * reference_image_timestep * 1000, pooled_projections)
@@ -870,16 +1004,23 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                     torch.ones_like(timestep) * reference_image_timestep * 1000, guidance, pooled_projections
                 )
             )
+            if fixed_condition_temb is not None:
+                reference_temb = torch.where(condition_prefix_mask[:, None], fixed_condition_temb, reference_temb)
 
         type_rope = self.config.token_type_rope or self.config.sparse_target
-        txt_ids = prepare_branch_ids(txt_ids, batch_size, encoder_hidden_states.shape[1], 0 if type_rope else None)
+        text_length = condition_kv_cache.text_length if cached_condition else encoder_hidden_states.shape[1]
+        if not cached_condition:
+            txt_ids = prepare_branch_ids(txt_ids, batch_size, text_length, 0 if type_rope else None)
         img_ids = prepare_branch_ids(img_ids, batch_size, height * width, 2 if type_rope else None)
         if layout is not None:
             # Gather existing 2D IDs, never replace them with [0..N_active).
             img_ids = layout.gather(img_ids)
-        image_rotary_emb = batched_rotary_embedding(self.pos_embed, torch.cat((txt_ids, img_ids), dim=1))
+        image_rotary_emb = batched_rotary_embedding(
+            self.pos_embed, img_ids if cached_condition else torch.cat((txt_ids, img_ids), dim=1),
+        )
         reference_image_rotary_emb = None
-        reference_length = reference_kv_cache.reference_length if cached_reference else 0
+        reference_length = (condition_kv_cache.reference_length if cached_condition else
+                            reference_kv_cache.reference_length if cached_reference else 0)
         if reference_image_hidden_states is not None:
             reference_length = reference_image_hidden_states.shape[1]
             reference_image_ids = prepare_branch_ids(
@@ -890,83 +1031,36 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         attention_mask = None
         if layout is not None:
             key_valid = torch.cat((
-                torch.ones(batch_size, encoder_hidden_states.shape[1], device=hidden_states.device, dtype=torch.bool),
+                torch.ones(batch_size, text_length, device=hidden_states.device, dtype=torch.bool),
                 layout.valid,
                 torch.ones(batch_size, reference_length, device=hidden_states.device, dtype=torch.bool),
             ), dim=1)
             attention_mask = hidden_states.new_zeros(batch_size, 1, 1, key_valid.shape[1])
             attention_mask.masked_fill_(~key_valid[:, None, None], float("-inf"))
         for processor in self.attn_processors.values():
-            processor.text_seq_len = encoder_hidden_states.shape[1]
+            processor.text_seq_len = text_length
             processor.target_token_indices = layout.indices if layout is not None else None
             processor.target_token_valid = layout.valid if layout is not None else None
             processor.target_grid_size = (height, width)
 
         for index_block, block in enumerate(self.transformer_blocks):
             reference_cache_key = f"transformer_blocks.{index_block}"
-            if self.training and self.gradient_checkpointing:
-
-                def create_custom_forward(module, return_dict=None):
-                    def custom_forward(*inputs, **kwargs):
-                        if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict, **kwargs)
-                        else:
-                            return module(*inputs, **kwargs)
-
-                    return custom_forward
-
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                if reference_image_hidden_states is not None:
-                    encoder_hidden_states, hidden_states, reference_image_hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(block),
-                        hidden_states=hidden_states,
-                        reference_image_hidden_states=reference_image_hidden_states if reference_image_hidden_states is not None else None,
-                        encoder_hidden_states=encoder_hidden_states,
-                        temb=temb,  
-                        reference_temb = reference_temb if reference_image_hidden_states is not None else None,
-                        image_rotary_emb=image_rotary_emb,
-                        reference_image_rotary_emb=reference_image_rotary_emb if reference_image_hidden_states is not None else None,
-                        lora_part_enable=lora_part_enable,
-                        attention_mask=attention_mask,
-                        **ckpt_kwargs,
-                    )
-                else:
-                    encoder_hidden_states, hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(block),
-                        hidden_states,
-                        encoder_hidden_states,
-                        temb,
-                        image_rotary_emb,
-                        attention_mask=attention_mask,
-                        **ckpt_kwargs,
-                    )
-
+            block_kwargs = dict(
+                hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb,
+                reference_image_hidden_states=reference_image_hidden_states,
+                reference_temb=reference_temb if reference_image_hidden_states is not None else None,
+                image_rotary_emb=image_rotary_emb, reference_image_rotary_emb=reference_image_rotary_emb,
+                lora_part_enable=lora_part_enable, attention_mask=attention_mask,
+                reference_kv_cache=reference_kv_cache, reference_cache_key=reference_cache_key,
+                text_temb=text_temb, condition_prefix_mask=condition_prefix_mask,
+                condition_kv_cache=condition_kv_cache,
+            )
+            result = (torch.utils.checkpoint.checkpoint(block, use_reentrant=False, **block_kwargs)
+                      if self.training and self.gradient_checkpointing else block(**block_kwargs))
+            if reference_image_hidden_states is not None:
+                encoder_hidden_states, hidden_states, reference_image_hidden_states = result
             else:
-                if reference_image_hidden_states is not None:
-                    encoder_hidden_states, hidden_states, reference_image_hidden_states = block(
-                        hidden_states=hidden_states,
-                        reference_image_hidden_states=reference_image_hidden_states if reference_image_hidden_states is not None else None,
-                        encoder_hidden_states=encoder_hidden_states,
-                        temb=temb,
-                        reference_temb = reference_temb if reference_image_hidden_states is not None else None,
-                        image_rotary_emb=image_rotary_emb,
-                        reference_image_rotary_emb=reference_image_rotary_emb if reference_image_hidden_states is not None else None,
-                        lora_part_enable=lora_part_enable,
-                        attention_mask=attention_mask,
-                        reference_kv_cache=reference_kv_cache,
-                        reference_cache_key=reference_cache_key,
-                    )
-                else:
-                    encoder_hidden_states, hidden_states = block(
-                        hidden_states=hidden_states,
-                        encoder_hidden_states=encoder_hidden_states,
-                        temb=temb,  
-                        image_rotary_emb=image_rotary_emb,
-                        attention_mask=attention_mask,
-                        lora_part_enable=lora_part_enable,
-                        reference_kv_cache=reference_kv_cache,
-                        reference_cache_key=reference_cache_key,
-                    )
+                encoder_hidden_states, hidden_states = result
                 
             # controlnet residual
             if controlnet_block_samples is not None:
@@ -977,78 +1071,38 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                     control_residual = layout.gather(control_residual)
                 hidden_states = hidden_states + control_residual
 
-        hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+        text_query_length = 0 if cached_condition else text_length
+        if not cached_condition:
+            hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
         for index_block, block in enumerate(self.single_transformer_blocks):
             reference_cache_key = f"single_transformer_blocks.{index_block}"
-            if self.training and self.gradient_checkpointing:
-
-                def create_custom_forward(module, return_dict=None):
-                    def custom_forward(*inputs, **kwargs):
-                        if return_dict is not None:
-                            return module(*inputs, return_dict=return_dict, **kwargs)
-                        else:
-                            return module(*inputs, **kwargs)
-
-                    return custom_forward
-
-                ckpt_kwargs: Dict[str, Any] = {"use_reentrant": False} if is_torch_version(">=", "1.11.0") else {}
-                if reference_image_hidden_states is not None:
-                    hidden_states, reference_image_hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(block),
-                        hidden_states=hidden_states,
-                        reference_image_hidden_states=reference_image_hidden_states if reference_image_hidden_states is not None else None,
-                        temb=temb,
-                        reference_temb = reference_temb if reference_image_hidden_states is not None else None,
-                        image_rotary_emb=image_rotary_emb,
-                        reference_image_rotary_emb=reference_image_rotary_emb if reference_image_hidden_states is not None else None,
-                        lora_part_enable=lora_part_enable,
-                        attention_mask=attention_mask,
-                        **ckpt_kwargs,
-                    )
-                else:
-                    hidden_states = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(block),
-                        hidden_states,
-                        temb,
-                        image_rotary_emb,
-                        attention_mask=attention_mask,
-                        **ckpt_kwargs,
-                    )
+            block_kwargs = dict(
+                hidden_states=hidden_states, temb=temb,
+                reference_image_hidden_states=reference_image_hidden_states,
+                reference_temb=reference_temb if reference_image_hidden_states is not None else None,
+                image_rotary_emb=image_rotary_emb, reference_image_rotary_emb=reference_image_rotary_emb,
+                lora_part_enable=lora_part_enable, attention_mask=attention_mask,
+                reference_kv_cache=reference_kv_cache, reference_cache_key=reference_cache_key,
+                text_temb=text_temb, text_length=text_query_length,
+                condition_prefix_mask=condition_prefix_mask, condition_kv_cache=condition_kv_cache,
+            )
+            result = (torch.utils.checkpoint.checkpoint(block, use_reentrant=False, **block_kwargs)
+                      if self.training and self.gradient_checkpointing else block(**block_kwargs))
+            if reference_image_hidden_states is not None:
+                hidden_states, reference_image_hidden_states = result
             else:
-                if reference_image_hidden_states is not None:
-                    hidden_states, reference_image_hidden_states = block(
-                        hidden_states=hidden_states,
-                        reference_image_hidden_states=reference_image_hidden_states if reference_image_hidden_states is not None else None,
-                        temb=temb,
-                        reference_temb = reference_temb if reference_image_hidden_states is not None else None,
-                        image_rotary_emb=image_rotary_emb,
-                        reference_image_rotary_emb=reference_image_rotary_emb if reference_image_hidden_states is not None else None,
-                        lora_part_enable=lora_part_enable,
-                        attention_mask=attention_mask,
-                        reference_kv_cache=reference_kv_cache,
-                        reference_cache_key=reference_cache_key,
-                    )
-                else:
-                    hidden_states = block(
-                        hidden_states=hidden_states,
-                        temb=temb,
-                        image_rotary_emb=image_rotary_emb,
-                        attention_mask=attention_mask,
-                        lora_part_enable=lora_part_enable,
-                        reference_kv_cache=reference_kv_cache,
-                        reference_cache_key=reference_cache_key,
-                    )
+                hidden_states = result
 
             # controlnet residual
             if controlnet_single_block_samples is not None: 
                 interval_control = len(self.single_transformer_blocks) / len(controlnet_single_block_samples)
                 interval_control = int(np.ceil(interval_control))
-                control_residual = controlnet_single_block_samples[index_block // interval_control][:, encoder_hidden_states.shape[1]:]
+                control_residual = controlnet_single_block_samples[index_block // interval_control][:, text_length:]
                 if layout is not None:
                     control_residual = layout.gather(control_residual)
-                hidden_states[:, encoder_hidden_states.shape[1] :, ...] = (
-                    hidden_states[:, encoder_hidden_states.shape[1] :, ...]
+                hidden_states[:, text_query_length:, ...] = (
+                    hidden_states[:, text_query_length:, ...]
                     + control_residual
                 )
 
@@ -1057,8 +1111,13 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                 [f"transformer_blocks.{i}" for i in range(len(self.transformer_blocks))]
                 + [f"single_transformer_blocks.{i}" for i in range(len(self.single_transformer_blocks))]
             )
+        if condition_kv_cache is not None and not cached_condition:
+            condition_kv_cache.freeze(
+                [f"transformer_blocks.{i}" for i in range(len(self.transformer_blocks))]
+                + [f"single_transformer_blocks.{i}" for i in range(len(self.single_transformer_blocks))]
+            )
 
-        hidden_states = hidden_states[:, encoder_hidden_states.shape[1] :, ...] 
+        hidden_states = hidden_states[:, text_query_length:, ...]
 
         if layout is not None:
             hidden_states = layout.scatter(hidden_states, full_target_hidden_states)

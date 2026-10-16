@@ -22,6 +22,7 @@ if __name__ == "__main__":
         height=1024,
         width=1024,
         num_inference_steps=36, # For some simple tasks, 16 steps are enough!
+        inference_shift=float(os.environ.get("INFERENCE_SHIFT", "1.0")),
         guidance_scale=6,
         reference_strength=1.1,
         reference_image=[input_image.resize((1024, 1024))],

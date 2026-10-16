@@ -47,7 +47,7 @@ def prepare_edit_only_corruption(
     mask_token_id: int,
     random_scores: Optional[torch.Tensor] = None,
 ):
-    """Apply the original mask-ratio schedule only to editable target tokens."""
+    """Mask/supervise a generation region, including halo when the caller enables it."""
     if target_tokens.shape != source_tokens.shape or target_tokens.shape != token_edit_mask.shape:
         raise ValueError("target, source, and token edit mask must have identical [B,N] shapes")
     token_edit_mask = token_edit_mask.bool()
@@ -111,7 +111,7 @@ def save_mask_debug_visualization(
     token_size: Tuple[int, int],
     output_path: str,
 ) -> None:
-    """Save source, pixel mask, token mask, and token-mask overlay side by side."""
+    """Save source, original pixel ROI, generation-token mask, and its overlay."""
     source = source_image.detach().float().cpu()
     if source.ndim == 4:
         source = source[0]
