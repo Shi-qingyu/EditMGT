@@ -52,14 +52,10 @@ if [[ "${CACHE_CONDITIONING:-0}" == "1" ]]; then
     TRAIN_EXTRA_ARGS+=(--cache_conditioning --condition_cache_threshold "${CONDITION_CACHE_THRESHOLD:-0.3}")
 fi
 TRAIN_EXTRA_ARGS+=(
-    --timestep_sampling "${TIMESTEP_SAMPLING:-cosine}"
-    --timestep_logit_mean "${TIMESTEP_LOGIT_MEAN:-0.0}"
-    --timestep_logit_std "${TIMESTEP_LOGIT_STD:-1.0}"
-    --timestep_shift "${TIMESTEP_SHIFT:-1.0}"
-    --timestep_cosine_mix "${TIMESTEP_COSINE_MIX:-0.0}"
-    --timestep_low_noise_mix "${TIMESTEP_LOW_NOISE_MIX:-0.0}"
+    --timestep_sampling cosine
     --time_conditioning "${TIME_CONDITIONING:-legacy}"
     --mask_loss_reduction "${MASK_LOSS_REDUCTION:-token}"
+    --cond_dropout_prob "${COND_DROPOUT_PROB:-0.0}"
 )
 
 TRAIN_OUTPUT_DIR="${TRAIN_OUTPUT_DIR:-./runs/editmgt_sparse_inter_edit}"
@@ -70,7 +66,7 @@ exec "${TRAIN_LAUNCH[@]}" train/train.py \
     --train_edit_model True \
     --edit_only_diffusion \
     --sparse_target \
-    --sparse_target_halo "${SPARSE_TARGET_HALO:-2}" \
+    --sparse_target_halo "${SPARSE_TARGET_HALO:-1}" \
     --mask_debug_dir "$TRAIN_OUTPUT_DIR/mask_debug" \
     --output_dir "$TRAIN_OUTPUT_DIR" \
     --train_batch_size 4 \
@@ -96,8 +92,9 @@ exec "${TRAIN_LAUNCH[@]}" train/train.py \
     --validation_at_start \
     --validation_num_images 5 \
     --validation_num_inference_steps 18 \
-    --validation_inference_shift "${VALIDATION_INFERENCE_SHIFT:-1.0}" \
+    --validation_inference_shift 1.0 \
     --validation_guidance_scale 6 \
+    --validation_negative_prompt "${VALIDATION_NEGATIVE_PROMPT:-}" \
     --validation_reference_kv_cache_threshold "${CONDITION_CACHE_THRESHOLD:-0.3}" \
     --validation_seed 42 \
     --report_to "${REPORT_TO:-wandb}" \

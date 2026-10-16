@@ -59,6 +59,18 @@ def pilimage_to_token(pipe, image):
     latents = pipe.vqvae.quantize(latents)[2][2].reshape(latents_bsz, latents_height, latents_width)
     return latents
 
+
+def _expand_image_batch(values, batch_size, num_images_per_prompt, name):
+    """Broadcast a shared image/mask or repeat one per prompt."""
+    if values.shape[0] == batch_size:
+        return values
+    if values.shape[0] == 1:
+        return values.expand(batch_size, *values.shape[1:])
+    if values.shape[0] * num_images_per_prompt == batch_size:
+        return values.repeat_interleave(num_images_per_prompt, dim=0)
+    raise ValueError(f"{name} batch {values.shape[0]} does not match output batch {batch_size}")
+
+
 class Pipeline(DiffusionPipeline):
     image_processor: VaeImageProcessor
     vqvae: VQModel
@@ -94,7 +106,7 @@ class Pipeline(DiffusionPipeline):
         )
         self.vae_scale_factor = 2 ** (len(self.vqvae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor,
-                                                  do_normalize=False)
+                                                  do_normalize=False, do_convert_rgb=True)
 
         self.mask_processor = VaeImageProcessor(
             vae_scale_factor=self.vae_scale_factor,
@@ -114,7 +126,10 @@ class Pipeline(DiffusionPipeline):
         self.local_scores_list = {}
         self.local_query_text = None
  
-    def safe_decode_latents(self, latents, batch_size, height, width, output_type):
+    def safe_decode_latents(
+        self, latents, batch_size, height, width, output_type,
+        preserve_image=None, pixel_edit_mask=None,
+    ):
         decode_latents = latents.clone()
         mask_token_id = self.scheduler.config.mask_token_id
         # Replace the mask token with 0 (pure black)
@@ -134,6 +149,15 @@ class Pipeline(DiffusionPipeline):
                 self.vqvae.config.latent_channels,
             ),
         ).sample.clip(0, 1)
+        if preserve_image is not None:
+            if pixel_edit_mask is None:
+                raise ValueError("Pixel preservation requires the original pixel edit mask")
+            # Keep source RGB in float32 even when the VQ model uses BF16.
+            # Unchanged VQ tokens alone do not preserve source pixels exactly.
+            decoded = torch.where(
+                pixel_edit_mask.to(device=decoded.device, dtype=torch.bool),
+                decoded.float(), preserve_image.to(device=decoded.device, dtype=torch.float32),
+            )
         decoded = self.image_processor.postprocess(decoded, output_type)
         
         if needs_upcasting:
@@ -181,6 +205,7 @@ class Pipeline(DiffusionPipeline):
         reference_kv_cache_threshold: float = 0.3,
         use_condition_kv_cache: Optional[bool] = None,
         inference_shift: Optional[float] = None,
+        preserve_unmasked_pixels: bool = True,
     ):
         """
         The call function to the pipeline for generation.
@@ -193,18 +218,22 @@ class Pipeline(DiffusionPipeline):
                 Defaults to the checkpoint setting when an edit mask is provided.
             sparse_target_halo (`int`, *optional*):
                 Halo radius on the Transformer grid (default: checkpoint setting).
+            preserve_unmasked_pixels (`bool`, *optional*, defaults to `True`):
+                For edit-only diffusion, composite decoded RGB inside the ORIGINAL
+                pixel mask onto the source image. Halo tokens still provide context
+                and denoise normally, but cannot change the output outside this mask.
+                This applies to decoded outputs, including intermediate previews;
+                output_type="latent" returns the generation latents without compositing.
             inference_shift (`float`, *optional*):
-                Positive rational shift s*r/(1+(s-1)*r) of the inference mask
-                schedule. Defaults to the scheduler config (1.0 = unshifted).
-                Values above 1 retain more masks at each intermediate step.
-                Remasking, model noise conditioning and cache capture share it.
+                Compatibility argument; only 1.0 is accepted. All generations,
+                previews and benchmarks use the unshifted cosine mask schedule.
             use_reference_kv_cache (`bool`, *optional*, defaults to `True`):
                 Capture full per-layer reference K/V once at the low-noise
                 transition, then pass only text and target through the model.
                 The cache is local to this generation and never stores target K/V.
             reference_kv_cache_threshold (`float`, *optional*, defaults to `0.3`):
                 Start capture when the scheduled remaining editable mask fraction
-                is at most this value (0..1). This uses the shifted cosine/linear
+                is at most this value (0..1). This uses the cosine
                 schedule before each forward, without reading GPU token counts.
                 Higher thresholds reuse more steps. Zero disables reuse.
                 Cache-conditioned checkpoints cannot capture before their saved
@@ -292,6 +321,8 @@ class Pipeline(DiffusionPipeline):
         self.selected_mask_token = {}
         self.local_scores_list = {}
         self.last_attention_analysis = None
+        self.last_generation_mask = None
+        self.last_edit_region_info = None
 
         if sparse_target is None:
             sparse_target = self.transformer.config.sparse_target and mask_image is not None
@@ -411,10 +442,20 @@ class Pipeline(DiffusionPipeline):
 
         token_edit_mask = None
         target_region_mask = None
+        pixel_edit_mask = None
+        source_pixel_values = None
+        composite_source = bool(edit_only_diffusion and preserve_unmasked_pixels)
         if mask_image is not None:
             token_edit_mask = self.mask_processor.preprocess(
                 mask_image, height // self.vae_scale_factor, width // self.vae_scale_factor
             )
+            if composite_source:
+                # Retain the annotation at image resolution, independently of
+                # VQ/Transformer-grid projection and halo dilation.
+                pixel_edit_mask = _expand_image_batch(
+                    self.mask_processor.preprocess(mask_image, height, width).bool(),
+                    batch_size, num_images_per_prompt, "Pixel edit mask",
+                )
 
         shape = (batch_size, height // self.vae_scale_factor, width // self.vae_scale_factor)
         latents = torch.full(
@@ -422,8 +463,16 @@ class Pipeline(DiffusionPipeline):
         )  # 1024: torch.Size([bs, 64, 64])  512: torch.Size([bs, 32, 32])
         num_warmup_steps = len(self.scheduler.timesteps) - num_inference_steps * self.scheduler.order
 
-        if reference_image is not None: 
-            if isinstance(reference_image, list):
+        if reference_image is not None:
+            if edit_only_diffusion:
+                # Full-frame preprocessing keeps a supplied pixel mask aligned.
+                # Reuse these pixels for VQ encoding and the final composition;
+                # source RGB must not pass through a lossy encode/decode cycle.
+                source_pixel_values = self.image_processor.preprocess(
+                    reference_image, height=height, width=width,
+                ).to(device=self._execution_device, dtype=torch.float32)
+                reference_image = source_pixel_values.to(dtype=self.vqvae.dtype)
+            elif isinstance(reference_image, list):
                 reference_image = [process_image(img, size=height)['image'].to(dtype=self.vqvae.dtype, device=self._execution_device).unsqueeze(0) for img in reference_image]
                 reference_image = torch.cat(reference_image, dim=0)
             else:
@@ -436,6 +485,12 @@ class Pipeline(DiffusionPipeline):
                 reference_image_hidden_states = reference_image_hidden_states.expand(batch_size, -1, -1)
             elif reference_image_hidden_states.shape[0] * num_images_per_prompt == batch_size:
                 reference_image_hidden_states = reference_image_hidden_states.repeat_interleave(num_images_per_prompt, dim=0)
+            if composite_source:
+                # Expand RGB only AFTER encoding: a shared reference is still
+                # VQ-encoded once, regardless of the number of output images.
+                source_pixel_values = _expand_image_batch(
+                    source_pixel_values, batch_size, num_images_per_prompt, "Source image",
+                )
 
             if mask_image is not None:
                 source_tokens = reference_image_hidden_states.clone()
@@ -550,14 +605,13 @@ class Pipeline(DiffusionPipeline):
 
                 step_mask_ratio = mask_ratios[i]
                 # New checkpoints derive model time from step_mask_ratio.
-                # Legacy checkpoints retain their original units, evaluated at
-                # the equivalent position of the shifted noise level.
+                # Legacy checkpoints retain their original step-ID time units.
                 model_timestep = None
                 if self.transformer.config.time_conditioning == "legacy":
                     model_timestep = torch.full(
                         (model_input.shape[0],), self.scheduler.conditioning_timesteps[i],
                         device=model_input.device,
-                        dtype=torch.long if self.scheduler.inference_shift == 1.0 else torch.float32,
+                        dtype=torch.long,
                     )
 
                 # image edit
@@ -683,10 +737,35 @@ class Pipeline(DiffusionPipeline):
         if condition_kv_cache is not None:
             condition_kv_cache.clear()
 
+        if edit_only_diffusion:
+            # Export the actual token generation mask for reports, rather than
+            # incorrectly showing only the smaller requested output region.
+            self.last_generation_mask = token_edit_mask.detach().cpu()
+            original_token_mask = target_region_mask.detach().cpu()
+            self.last_edit_region_info = {
+                "sparse_target_halo": (
+                    self.transformer.config.sparse_target_halo if sparse_target_halo is None
+                    else sparse_target_halo
+                ) if sparse_target else 0,
+                "vq_grid_size": list(token_edit_mask.shape[-2:]),
+                "original_token_mask_ratio": original_token_mask.float().mean().item(),
+                "generation_token_mask_ratio": self.last_generation_mask.float().mean().item(),
+                "preserve_unmasked_pixels": bool(composite_source and output_type != "latent"),
+                "output_compositing": (
+                    "original_pixel_mask" if composite_source and output_type != "latent" else "none"
+                ),
+            }
+        decode_preservation = {
+            "preserve_image": source_pixel_values if composite_source else None,
+            "pixel_edit_mask": pixel_edit_mask,
+        }
         if output_type == "latent":
             output = latents
         else:
-            output = self.safe_decode_latents(latents=latents, batch_size=batch_size, height=height, width=width, output_type=output_type)
+            output = self.safe_decode_latents(
+                latents=latents, batch_size=batch_size, height=height, width=width,
+                output_type=output_type, **decode_preservation,
+            )
         if return_attention:
             self.transformer.clear_attention_hooks()
             self.attention_enable_blocks = previous_attention_blocks
@@ -694,7 +773,8 @@ class Pipeline(DiffusionPipeline):
         # See Attention: Decode intermediate images at target steps
         if return_target_step_images:
             intermediate_output = [self.safe_decode_latents(latents=l, batch_size=batch_size, height=height, 
-                                                            width=width, output_type=output_type) for l in intermediate_latents.values()]
+                                                            width=width, output_type=output_type,
+                                                            **decode_preservation) for l in intermediate_latents.values()]
 
         self.maybe_free_model_hooks()
 

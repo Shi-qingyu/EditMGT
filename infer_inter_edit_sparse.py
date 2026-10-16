@@ -11,14 +11,13 @@ from src.editmgt import init_edit_mgt
 from src.mask_utils import normalize_edit_mask_image, resize_binary_edit_mask
 from src.mask_schedule import validate_inference_shift
 from src.train_validation import mask_overlay, run_inter_edit_validation
-from src.v2_model import negative_prompt
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--checkpoint", type=Path,
-        default=PROJECT_ROOT / "runs/editmgt_sparse_inter_edit/checkpoint-3600",
+        default=PROJECT_ROOT / "runs/editmgt_sparse_inter_edit_en_cache_magicbrush_lognormal/checkpoint-1200",
         help="Training checkpoint directory containing transformer/config.json and weights.",
     )
     parser.add_argument("--model-path", default=str(PROJECT_ROOT / "checkpoint/EditMGT"),
@@ -34,12 +33,16 @@ def parse_args():
     parser.add_argument("--resolution", type=int, default=1024)
     parser.add_argument("--num-inference-steps", type=int, default=18)
     parser.add_argument("--inference-shift", type=validate_inference_shift, default=1.0,
-                        help="Positive inference mask-schedule shift; 1 keeps the unshifted schedule.")
+                        help="Compatibility option; only 1 is accepted, and inference always uses cosine.")
     parser.add_argument("--guidance-scale", type=float, default=6.0)
+    parser.add_argument("--negative-prompt", default="",
+                        help="Negative text; empty matches CFG's empty-text training condition.")
     parser.add_argument("--reference-strength", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--sparse-target-halo", type=int, default=None,
-                        help="Override the checkpoint halo; otherwise use its saved setting.")
+    parser.add_argument("--sparse-target-halo", type=int, default=1,
+                        help="Transformer-cell halo; default 1 matches train/train_en.sh, including for older checkpoints.")
+    parser.add_argument("--preserve-unmasked-pixels", action=argparse.BooleanOptionalAction, default=True,
+                        help="Copy source pixels outside the original mask; disable to inspect the raw VQ output.")
     parser.add_argument("--disable-reference-kv-cache", action="store_true")
     parser.add_argument("--disable-condition-kv-cache", action="store_true",
                         help="Recompute text/reference while retaining the checkpoint's trained low-noise masks.")
@@ -101,10 +104,11 @@ def main(args):
         inference_shift=args.inference_shift,
         guidance_scale=args.guidance_scale, reference_strength=args.reference_strength,
         seed=args.seed, edit_only_diffusion=True, sparse_target=True,
-        sparse_target_halo=halo, negative_prompt=negative_prompt or None,
+        sparse_target_halo=halo, negative_prompt=args.negative_prompt,
         use_reference_kv_cache=not args.disable_reference_kv_cache,
         reference_kv_cache_threshold=args.reference_kv_cache_threshold,
         use_condition_kv_cache=False if args.disable_condition_kv_cache else None,
+        preserve_unmasked_pixels=args.preserve_unmasked_pixels,
     )
     metadata_path = report["step_dir"] / "metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))

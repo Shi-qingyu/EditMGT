@@ -7,7 +7,7 @@ from termcolor import cprint
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.utils import BaseOutput
 from diffusers.schedulers.scheduling_utils import SchedulerMixin
-from src.mask_schedule import scheduled_mask_ratio, legacy_timestep_for_mask_ratio, validate_inference_shift
+from src.mask_schedule import scheduled_mask_ratio, validate_inference_shift
 
 def gumbel_noise(t, generator=None):
     device = generator.device if generator is not None else t.device
@@ -72,7 +72,9 @@ class Scheduler(SchedulerMixin, ConfigMixin):
         masking_schedule: str = "cosine",
         inference_shift: float = 1.0,
     ):
-        self.inference_shift = validate_inference_shift(inference_shift)
+        # Constructor fields are accepted when loading older scheduler configs.
+        # Every generation normalizes them to the single supported cosine law.
+        self.inference_shift = 1.0
         self.temperatures = None
         self.timesteps = None
         self.mask_ratios = None
@@ -90,34 +92,24 @@ class Scheduler(SchedulerMixin, ConfigMixin):
     ):
         if num_inference_steps < 1:
             raise ValueError("num_inference_steps must be positive")
-        # A per-call override does not mutate the saved scheduler default.
-        self.inference_shift = validate_inference_shift(
-            self.config.inference_shift if inference_shift is None else inference_shift
-        )
+        if inference_shift is not None:
+            validate_inference_shift(inference_shift)
+        self.inference_shift = 1.0
+        self.register_to_config(masking_schedule="cosine", inference_shift=1.0)
         self.timesteps = torch.arange(num_inference_steps, device=device).flip(0)
         self.mask_ratios = tuple(
             scheduled_mask_ratio(i, num_inference_steps, self.config.masking_schedule, self.inference_shift)
             for i in range(num_inference_steps + 1)
         )
-        if self.inference_shift == 1.0:
-            # Preserve the original float32 cosine arithmetic before floor()
-            # converts ratios to token counts, including values near integers.
-            progress = torch.arange(num_inference_steps + 1, device=device) / num_inference_steps
-            self._mask_ratios_tensor = (
-                torch.cos(progress * math.pi / 2) if self.config.masking_schedule == "cosine" else 1 - progress
-            )
-            self._mask_ratios_tensor[0] = 1.0
-            self._mask_ratios_tensor[-1] = 0.0
-        else:
-            self._mask_ratios_tensor = torch.tensor(self.mask_ratios, device=device, dtype=torch.float32)
-        # Keep exact historical integer time values for the identity shift.
-        # Shifted legacy models receive fractional positions in the same units;
-        # normalized models use mask_ratios directly inside the Transformer.
-        self.conditioning_timesteps = (
-            tuple(range(num_inference_steps - 1, -1, -1)) if self.inference_shift == 1.0 else
-            tuple(legacy_timestep_for_mask_ratio(r, num_inference_steps, self.config.masking_schedule)
-                  for r in self.mask_ratios[:-1])
-        )
+        # Preserve the original float32 cosine arithmetic before floor()
+        # converts ratios to token counts, including values near integers.
+        progress = torch.arange(num_inference_steps + 1, device=device) / num_inference_steps
+        self._mask_ratios_tensor = torch.cos(progress * math.pi / 2)
+        self._mask_ratios_tensor[0] = 1.0
+        self._mask_ratios_tensor[-1] = 0.0
+        # Legacy weights keep their step-ID time units; normalized weights use
+        # the same cosine mask_ratios directly inside the Transformer.
+        self.conditioning_timesteps = tuple(range(num_inference_steps - 1, -1, -1))
 
         if isinstance(temperature, (tuple, list)):
             self.temperatures = torch.linspace(temperature[0], temperature[1], num_inference_steps, device=device)

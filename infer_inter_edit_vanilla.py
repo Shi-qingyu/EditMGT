@@ -9,7 +9,6 @@ import torch
 from PIL import Image, ImageDraw
 
 from src.editmgt import init_edit_mgt
-from src.v2_model import negative_prompt
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -39,8 +38,10 @@ def parse_args():
     parser.add_argument("--resolution", type=int, default=1024)
     parser.add_argument("--num-inference-steps", type=int, default=36)
     parser.add_argument("--inference-shift", type=validate_inference_shift, default=1.0,
-                        help="Positive inference mask-schedule shift; 1 keeps the unshifted schedule.")
+                        help="Compatibility option; only 1 is accepted, and inference always uses cosine.")
     parser.add_argument("--guidance-scale", type=float, default=6.0)
+    parser.add_argument("--negative-prompt", default="",
+                        help="Negative text; empty avoids suppressing requested text and logos.")
     parser.add_argument("--reference-strength", type=float, default=1.1)
     parser.add_argument("--seed", type=int, default=42, help="Each case uses seed + sample_id, as in validation.")
     parser.add_argument("--bf16", action="store_true", help="Opt into BF16; default matches infer.py FP32.")
@@ -155,7 +156,7 @@ def main(args):
             guidance_scale=args.guidance_scale,
             reference_strength=args.reference_strength,
             reference_image=[case["source"]],
-            negative_prompt=negative_prompt or None,
+            negative_prompt=args.negative_prompt,
             generator=generator,
             edit_only_diffusion=False,
             sparse_target=False,
@@ -178,7 +179,7 @@ def main(args):
         "inference_shift": pipe.scheduler.inference_shift,
         "inference_schedule": getattr(pipe, "last_inference_schedule_info", None),
         "guidance_scale": args.guidance_scale, "reference_strength": args.reference_strength,
-        "negative_prompt": negative_prompt, "seed": args.seed, "bf16": args.bf16,
+        "negative_prompt": args.negative_prompt, "seed": args.seed, "bf16": args.bf16,
         "prompt_language": "en",
         "mask_input": False, "edit_only_diffusion": False, "sparse_target": False,
         "token_type_rope": False, "use_reference_kv_cache": False,

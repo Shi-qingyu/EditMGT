@@ -71,13 +71,19 @@ def add_benchmark_arguments(parser, benchmark):
     parser.add_argument("--metric-device", default=None, help="Defaults to --device; scoring runs after EditMGT is released.")
     parser.add_argument("--resolution", type=int, default=1024)
     parser.add_argument("--num-inference-steps", type=int, default=18)
-    parser.add_argument("--inference-shift", type=validate_inference_shift, default=1.0)
+    parser.add_argument("--inference-shift", type=validate_inference_shift, default=1.0,
+                        help="Compatibility option; only 1 is accepted, and benchmarks always use cosine.")
     parser.add_argument("--guidance-scale", type=float, default=6.0)
+    parser.add_argument("--negative-prompt", default="",
+                        help="Negative text for both vanilla and sparse models; empty avoids suppressing text/logo tasks.")
     parser.add_argument("--reference-strength", type=float, default=1.0)
     parser.add_argument("--reference-kv-cache-threshold", type=float, default=0.3)
     parser.add_argument("--disable-reference-kv-cache", action="store_true")
     parser.add_argument("--disable-condition-kv-cache", action="store_true")
-    parser.add_argument("--sparse-target-halo", type=int, default=None)
+    parser.add_argument("--sparse-target-halo", type=int, default=1,
+                        help="Transformer-cell halo; default 1 matches the English training entry point.")
+    parser.add_argument("--preserve-unmasked-pixels", action=argparse.BooleanOptionalAction, default=True,
+                        help="Composite only the original mask onto source RGB, including at native output resolution.")
     parser.add_argument("--mask-mode", choices=["provided", "none"], default="provided")
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
@@ -112,9 +118,9 @@ def validate_arguments(parser, args):
 
 def generation_config(args):
     keys = ("model_path", "vanilla", "device", "resolution", "num_inference_steps", "inference_shift",
-            "guidance_scale", "reference_strength", "reference_kv_cache_threshold",
+            "guidance_scale", "negative_prompt", "reference_strength", "reference_kv_cache_threshold",
             "disable_reference_kv_cache", "disable_condition_kv_cache", "sparse_target_halo",
-            "mask_mode", "bf16", "seed", "warmup", "save_inputs")
+            "mask_mode", "preserve_unmasked_pixels", "bf16", "seed", "warmup", "save_inputs")
     config = {key: getattr(args, key) for key in keys}
     config["checkpoint"] = str(args.checkpoint.resolve()) if args.checkpoint else None
     if args.checkpoint:
@@ -126,6 +132,10 @@ def generation_config(args):
                        set(root.glob("transformer/*.bin")))
         config["checkpoint_files"] = [file_identity(path) for path in files]
     config["input_preprocessing"] = "full-frame square resize; prediction restored to input size; no GT used for inference"
+    config["output_compositing"] = (
+        "original_pixel_mask_at_generation_and_native_resolution"
+        if args.mask_mode == "provided" and args.preserve_unmasked_pixels else "none"
+    )
     return config
 
 
@@ -221,16 +231,18 @@ class InferenceRunner:
 
     @torch.inference_mode()
     def generate(self, source, mask, instruction, seed):
-        from src.v2_model import negative_prompt
-
         args, pipe = self.args, self.pipe
-        native_size = source.size
-        source = source.convert("RGB").resize((args.resolution, args.resolution), Image.Resampling.BILINEAR)
+        native_source = source.convert("RGB")
+        native_size = native_source.size
+        source = native_source.resize((args.resolution, args.resolution), Image.Resampling.BILINEAR)
         provided = args.mask_mode == "provided"
+        native_mask = None
         if provided:
             if mask is None:
                 raise ValueError("Mask-provided evaluation requires an annotation; no mask is synthesized")
-            mask = resize_binary_edit_mask(normalize_edit_mask_image(mask), (args.resolution, args.resolution))
+            mask = normalize_edit_mask_image(mask)
+            native_mask = resize_binary_edit_mask(mask, (native_size[1], native_size[0]))
+            mask = resize_binary_edit_mask(mask, (args.resolution, args.resolution))
             if mask.getbbox() is None:
                 raise ValueError("Empty benchmark mask")
         sparse = provided and pipe.transformer.config.sparse_target
@@ -240,9 +252,10 @@ class InferenceRunner:
                 prompt=[instruction], reference_image=[source], mask_image=mask if provided else None,
                 height=args.resolution, width=args.resolution, num_inference_steps=args.num_inference_steps,
                 inference_shift=args.inference_shift, guidance_scale=args.guidance_scale,
-                reference_strength=args.reference_strength, negative_prompt=negative_prompt or None,
+                reference_strength=args.reference_strength, negative_prompt=args.negative_prompt,
                 generator=torch.Generator(device=pipe._execution_device).manual_seed(seed),
                 edit_only_diffusion=provided, sparse_target=sparse, sparse_target_halo=args.sparse_target_halo,
+                preserve_unmasked_pixels=args.preserve_unmasked_pixels,
                 use_reference_kv_cache=not args.disable_reference_kv_cache,
                 use_condition_kv_cache=False if args.disable_condition_kv_cache else None,
                 reference_kv_cache_threshold=args.reference_kv_cache_threshold, lora_part_enable=True,
@@ -271,8 +284,19 @@ class InferenceRunner:
             "inference_schedule": getattr(pipe, "last_inference_schedule_info", None),
             "sparse_target": sparse, "supervise_target_halo": pipe.transformer.config.supervise_target_halo,
             "sparse_target_halo": args.sparse_target_halo if args.sparse_target_halo is not None else pipe.transformer.config.sparse_target_halo,
+            "edit_region": getattr(pipe, "last_edit_region_info", None),
+            "preserve_unmasked_pixels": bool(provided and args.preserve_unmasked_pixels),
+            "output_compositing": (
+                "original_pixel_mask_at_generation_and_native_resolution"
+                if provided and args.preserve_unmasked_pixels else "none"
+            ),
         }
-        return image.resize(native_size, Image.Resampling.BICUBIC), info
+        image = image.resize(native_size, Image.Resampling.BICUBIC)
+        if provided and args.preserve_unmasked_pixels:
+            # Resizing can spread generated colors across a boundary. Apply
+            # the original annotation again at the exported/native resolution.
+            image = Image.composite(image, native_source, native_mask)
+        return image, info
 
     def close(self):
         del self.pipe

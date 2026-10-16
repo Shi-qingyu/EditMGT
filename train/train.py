@@ -28,7 +28,7 @@ from src.transformer import Transformer2DModel, get_text_encoder_length, load_lo
 from src.pipeline import _prepare_latent_image_ids
 from src.dataset_utils import HuggingFaceDataset, HuggingFaceEditDataset, HDFSParquetDataset, HDFSEditParquetDataset, \
                                 LocalEditParquetDataset, tokenize_prompt, encode_prompt, move_batch_prompt_device
-from src.v2_model import init_text_encoder, init_base_model, negative_prompt, get_pipeline
+from src.v2_model import init_text_encoder, init_base_model, get_pipeline
 from src.mask_utils import (
     prepare_edit_only_corruption,
     resize_edit_mask_to_tokens,
@@ -200,6 +200,10 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--allow_sampler_change_on_resume", action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument(
@@ -246,8 +250,10 @@ def parse_args():
                         help="Explicit test row indices; overrides --validation_num_images.")
     parser.add_argument("--validation_num_inference_steps", type=int, default=18)
     parser.add_argument("--validation_inference_shift", type=validate_inference_shift, default=1.0,
-                        help="Inference-only mask schedule shift for fixed test previews; independent of training timestep_shift.")
+                        help="Compatibility option; previews always use cosine and only the value 1 is accepted.")
     parser.add_argument("--validation_guidance_scale", type=float, default=6.0)
+    parser.add_argument("--validation_negative_prompt", type=str, default="",
+                        help="Negative text for previews; empty uses the same empty-text condition as CFG dropout.")
     parser.add_argument("--validation_reference_strength", type=float, default=1.0)
     parser.add_argument("--validation_disable_reference_kv_cache", action="store_true",
                         help="Recompute the full reference at every validation inference step.")
@@ -309,18 +315,16 @@ def parse_args():
                         help="Bound the number of image-containing parquet rows materialized together per worker.")
     parser.add_argument("--min_masking_rate", type=float, default=0.0)
     parser.add_argument(
-        "--timestep_sampling", choices=["cosine", "uniform", "logit_normal"], default="cosine",
-        help="Training distribution over editable-token mask ratios; cosine preserves the original uniform-progress sampler.",
+        "--timestep_sampling", choices=["cosine"], default="cosine",
+        help="All training uses r=cos(pi*u/2), u~Uniform(0,1).",
     )
-    parser.add_argument("--timestep_logit_mean", type=float, default=0.0,
-                        help="Mean of the normal variable before sigmoid; positive favors more masking.")
-    parser.add_argument("--timestep_logit_std", type=float, default=1.0)
-    parser.add_argument("--timestep_shift", type=float, default=1.0,
-                        help="Main-component mask-ratio shift s*r/(1+(s-1)*r); s>1 favors higher noise.")
-    parser.add_argument("--timestep_cosine_mix", type=float, default=0.0,
-                        help="Probability of an unshifted original-cosine sample to retain endpoint coverage.")
-    parser.add_argument("--timestep_low_noise_mix", type=float, default=0.0,
-                        help="Probability of a uniform sample between min_masking_rate and condition_cache_threshold.")
+    # Accept identity values from older commands/config tooling without keeping
+    # lognormal, shift or mixture execution paths active.
+    parser.add_argument("--timestep_logit_mean", type=float, choices=[0.0], default=0.0, help=argparse.SUPPRESS)
+    parser.add_argument("--timestep_logit_std", type=float, choices=[1.0], default=1.0, help=argparse.SUPPRESS)
+    parser.add_argument("--timestep_shift", type=float, choices=[1.0], default=1.0, help=argparse.SUPPRESS)
+    parser.add_argument("--timestep_cosine_mix", type=float, choices=[0.0], default=0.0, help=argparse.SUPPRESS)
+    parser.add_argument("--timestep_low_noise_mix", type=float, choices=[0.0], default=0.0, help=argparse.SUPPRESS)
     parser.add_argument(
         "--time_conditioning", choices=["legacy", "mask_ratio"], default="legacy",
         help="Use normalized mask ratio for matching train/infer time embeddings, or preserve old-checkpoint time units.",
@@ -329,7 +333,8 @@ def parse_args():
         "--mask_loss_reduction", choices=["token", "sample"], default="token",
         help="Average CE over all supervised tokens (legacy) or normalize each example before averaging.",
     )
-    parser.add_argument("--cond_dropout_prob", type=float, default=0.0)
+    parser.add_argument("--cond_dropout_prob", type=float, default=0.0,
+                        help="Probability of replacing BOTH text features with empty-prompt features per example.")
     parser.add_argument("--max_grad_norm", default=50.0, type=float, help="Max gradient norm.", required=False)
     parser.add_argument("--use_lora", action="store_true", help="Fine tune the model using LoRa")
     parser.add_argument("--lora_r", default=16, type=int)
@@ -361,12 +366,12 @@ def parse_args():
         help="Use full reference + sparse edit/halo target tokens; enables --edit_only_diffusion.",
     )
     parser.add_argument(
-        "--sparse_target_halo", type=int, default=2,
+        "--sparse_target_halo", type=int, default=1,
         help="Target-mask dilation radius on the Transformer grid after downsampling.",
     )
     parser.add_argument(
         "--supervise_target_halo", action=argparse.BooleanOptionalAction, default=True,
-        help="Corrupt/supervise the expanded active VQ region and regenerate it in inference; disable for context-only halo.",
+        help="Corrupt/supervise the expanded active VQ region; inference composites only the original pixel ROI by default.",
     )
     parser.add_argument(
         "--cache_conditioning", action="store_true",
@@ -387,6 +392,8 @@ def parse_args():
         args.report_to = None
     if args.validation_steps < 0:
         parser.error("--validation_steps must be non-negative (0 disables validation)")
+    if not 0.0 <= args.cond_dropout_prob <= 1.0:
+        parser.error("--cond_dropout_prob must be between 0 and 1")
     if args.validation_num_images < 1 or args.validation_num_inference_steps < 1:
         parser.error("Validation image count and inference steps must be positive")
     if not 0.0 <= args.validation_reference_kv_cache_threshold <= 1.0:
@@ -688,10 +695,23 @@ def main(args):
             with sampling_config_path.open() as f:
                 saved_sampling_config = json.load(f)
             if saved_sampling_config != timestep_sampling_config:
-                raise ValueError(
-                    "Checkpoint timestep sampling/time conditioning/loss reduction differs from this run. "
-                    "Resume with matching options, or start a new output directory for the changed objective."
-                )
+                saved_objective = {key: value for key, value in saved_sampling_config.items() if key != "sampler"}
+                current_objective = {key: value for key, value in timestep_sampling_config.items() if key != "sampler"}
+                if saved_objective != current_objective:
+                    raise ValueError(
+                        "Checkpoint time conditioning, loss reduction or config version differs from this run. "
+                        "These must match when resuming; migration to cosine changes only noise sampling."
+                    )
+                # The current training recipe is always cosine, including after
+                # resuming a historical lognormal/shifted/mixed-noise run.
+                logger.info("Resuming %s with a changed noise sampler: %s -> %s", input_dir,
+                            saved_sampling_config["sampler"], timestep_sampling_config["sampler"])
+                if accelerator.is_main_process:
+                    with open(os.path.join(args.output_dir, "sampler_transition.json"), "w") as f:
+                        json.dump({
+                            "resume_checkpoint": str(Path(input_dir).resolve()),
+                            "previous": saved_sampling_config, "current": timestep_sampling_config,
+                        }, f, indent=2)
         elif (args.time_conditioning != "legacy" or args.mask_loss_reduction != "token" or
               args.timestep_sampling != "cosine" or args.timestep_shift != 1.0 or
               args.timestep_cosine_mix != 0.0 or args.timestep_low_noise_mix != 0.0):
@@ -1014,6 +1034,9 @@ def main(args):
     logger.info("***** Running training *****")
     logger.info(f"  Num training steps = {args.max_train_steps}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
+    logger.info("  Text condition dropout probability = %s", args.cond_dropout_prob)
+    logger.info("  Sparse target halo = %s Transformer cell(s); supervise halo = %s",
+                args.sparse_target_halo, args.supervise_target_halo)
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info("  Timestep/noise sampling = %s", timestep_sampling_config)
@@ -1082,7 +1105,7 @@ def main(args):
                         reference_strength=args.validation_reference_strength,
                         seed=args.validation_seed, edit_only_diffusion=args.edit_only_diffusion,
                         sparse_target=args.sparse_target, sparse_target_halo=args.sparse_target_halo,
-                        negative_prompt=negative_prompt, use_ema=args.use_ema,
+                        negative_prompt=args.validation_negative_prompt, use_ema=args.use_ema,
                         use_reference_kv_cache=not args.validation_disable_reference_kv_cache,
                         reference_kv_cache_threshold=args.validation_reference_kv_cache_threshold,
                     )
@@ -1099,7 +1122,7 @@ def main(args):
                     pipe.set_progress_bar_config(disable=True)
                     images = pipe(
                         prompt=prompts, height=args.resolution, width=args.resolution,
-                        negative_prompt=[negative_prompt] * len(prompts),
+                        negative_prompt=[args.validation_negative_prompt] * len(prompts),
                         guidance_scale=args.validation_guidance_scale,
                         num_inference_steps=args.validation_num_inference_steps,
                         generator=torch.Generator(device=accelerator.device).manual_seed(args.validation_seed),
@@ -1214,23 +1237,23 @@ def main(args):
                             text_encoder, batch["prompt_input_ids"], args.text_encoder_architecture
                     )
 
+                condition_dropped = torch.zeros(
+                    encoder_hidden_states.shape[0], device=encoder_hidden_states.device, dtype=torch.bool,
+                )
                 if args.cond_dropout_prob > 0.0:
-                    assert encoder_hidden_states is not None
-
-                    batch_size = encoder_hidden_states.shape[0]
-
-                    mask = (
-                        torch.zeros((batch_size, 1, 1), device=encoder_hidden_states.device).float().uniform_(0, 1)
-                        < args.cond_dropout_prob
-                    )
-
-                    empty_embeds_ = empty_embeds.expand(batch_size, -1, -1)
+                    # One shared decision per example: CFG drops the text
+                    # sequence and pooled CLIP condition together, retaining
+                    # the source image, edit region and other micro conditions.
+                    condition_dropped = torch.rand(
+                        encoder_hidden_states.shape[0], device=encoder_hidden_states.device,
+                    ) < args.cond_dropout_prob
                     encoder_hidden_states = torch.where(
-                        (encoder_hidden_states * mask).bool(), encoder_hidden_states, empty_embeds_
+                        condition_dropped[:, None, None],
+                        empty_embeds.expand_as(encoder_hidden_states), encoder_hidden_states,
                     )
-
-                    empty_clip_embeds_ = empty_clip_embeds.expand(batch_size, -1)
-                    cond_embeds = torch.where((cond_embeds * mask.squeeze(-1)).bool(), cond_embeds, empty_clip_embeds_)
+                    cond_embeds = torch.where(
+                        condition_dropped[:, None], empty_clip_embeds.expand_as(cond_embeds), cond_embeds,
+                    )
 
                 bs = input_ids.shape[0]
                 vae_scale_factor = 2 ** (len(vq_model.config.block_out_channels) - 1)
@@ -1241,13 +1264,6 @@ def main(args):
                 if args.train_edit_model:
                     reference_image_hidden_states = source_tokens.reshape(bs, resolution, resolution)
                 # ----
-
-            with torch.no_grad():
-                batch["prompt_input_ids"] = move_batch_prompt_device(prompts=batch["prompt_input_ids"], device=accelerator.device, 
-                                                                    split=isinstance(text_encoder, list), non_blocking=True)
-                encoder_hidden_states, cond_embeds = encode_prompt(
-                    text_encoder, batch["prompt_input_ids"], args.text_encoder_architecture
-                )
 
             # Train Step
             with accelerator.accumulate(model):
@@ -1311,6 +1327,7 @@ def main(args):
                 noise_stats = torch.stack((
                     mask_prob.mean(),
                     (mask_prob <= args.condition_cache_threshold).float().mean(),
+                    condition_dropped.float().mean(),
                 ))
                 avg_noise_stats = accelerator.gather(noise_stats.unsqueeze(0)).mean(dim=0)
                 avg_masking_rate = avg_noise_stats[0]
@@ -1337,6 +1354,7 @@ def main(args):
                         "lr": lr_scheduler.get_last_lr()[0],
                         "avg_masking_rate": avg_masking_rate.item(),
                         "low_noise_sample_fraction": avg_low_noise_fraction.item(),
+                        "text_condition_dropout_fraction": avg_noise_stats[2].item(),
                     }
                     if args.edit_only_diffusion:
                         logs.update({

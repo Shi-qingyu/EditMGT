@@ -68,8 +68,8 @@ def select_validation_indices(rows, num_images=5, sample_indices=None, language=
     return indices
 
 
-def mask_overlay(source, mask):
-    tinted = Image.blend(source, Image.new("RGB", source.size, (255, 45, 45)), 0.4)
+def mask_overlay(source, mask, color=(255, 45, 45)):
+    tinted = Image.blend(source, Image.new("RGB", source.size, color), 0.4)
     return Image.composite(tinted, source, mask)
 
 
@@ -164,11 +164,16 @@ def validation_model_state(model, ema=None):
         np.random.set_state(numpy_state)
 
 
-def comparison_panel(case, generated, step, seed):
+def comparison_panel(case, generated, step, seed, generation_overlay=None):
     tile = min(512, case["source"].width)
     header, labels = 28, 24
-    images = [case["source"], case["overlay"], case["target"]]
-    column_labels = ["Source", "Edit mask overlay", "Ground truth"]
+    images = [case["source"], case["overlay"]]
+    column_labels = ["Source", "Original edit mask (output ROI)"]
+    if generation_overlay is not None:
+        images.append(generation_overlay)
+        column_labels.append("Generation tokens + halo")
+    images.append(case["target"])
+    column_labels.append("Ground truth")
     if generated is not None:
         images.append(generated)
         column_labels.append("Generated")
@@ -197,11 +202,16 @@ def _write_html_report(output_dir, step_dir, records):
     rows = []
     for record in records:
         input_dir = output_dir / record["input_dir"]
-        paths = [input_dir / "source.png", input_dir / "mask_overlay.png", input_dir / "target.png",
-                 step_dir / record["generated_path"]]
+        paths = [input_dir / "source.png", input_dir / "mask_overlay.png"]
+        labels = ["Source", "Original edit mask (output ROI)"]
+        if record.get("generation_mask_overlay_path"):
+            paths.append(step_dir / record["generation_mask_overlay_path"])
+            labels.append("Generation tokens + halo")
+        paths.extend((input_dir / "target.png", step_dir / record["generated_path"]))
+        labels.extend(("Ground truth", "Generated"))
         images = "".join(
             f'<figure><figcaption>{label}</figcaption><img src="{html.escape(os.path.relpath(path, step_dir))}"></figure>'
-            for label, path in zip(("Source", "Mask overlay", "Ground truth", "Generated"), paths)
+            for label, path in zip(labels, paths)
         )
         original_instruction = (
             f'<p>Original instruction: {html.escape(record["original_instruction"])}</p>'
@@ -210,10 +220,13 @@ def _write_html_report(output_dir, step_dir, records):
         rows.append(f'<section><h2>Sample {record["sample_id"]} · {html.escape(record["edit_type"])}</h2>'
                     f'{original_instruction}<p>{html.escape(record["instruction"])}</p>'
                     f'<div class="images">{images}</div></section>')
-    style = "body{font-family:sans-serif;margin:24px} .images{display:grid;grid-template-columns:repeat(4,1fr);gap:12px} figure{margin:0} img{width:100%}"
+    style = "body{font-family:sans-serif;margin:24px} .images{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:12px} figure{margin:0} img{width:100%}"
     (step_dir / "index.html").write_text(
         f'<!doctype html><meta charset="utf-8"><title>{step_dir.name}</title><style>{style}</style>'
-        f'<h1>Inter-Edit test · {step_dir.name}</h1>' + "".join(rows), encoding="utf-8",
+        f'<h1>Inter-Edit test · {step_dir.name}</h1>'
+        '<p>Red: original edit mask. Orange: internal token generation region, including halo. '
+        'When pixel preservation is enabled, only the red region is composited into the final image.</p>'
+        + "".join(rows), encoding="utf-8",
     )
     steps = sorted(path for path in output_dir.glob("step_*") if (path / "index.html").is_file())
     links = "".join(f'<li><a href="{path.name}/index.html">{path.name}</a> · '
@@ -232,6 +245,7 @@ def run_inter_edit_validation(
     use_reference_kv_cache=True, reference_kv_cache_threshold=0.3,
     use_condition_kv_cache=None,
     inference_shift=1.0,
+    preserve_unmasked_pixels=True,
 ):
     """Generate one case at a time to keep validation memory bounded."""
     if not cases:
@@ -260,11 +274,26 @@ def run_inter_edit_validation(
             reference_kv_cache_threshold=reference_kv_cache_threshold,
             use_condition_kv_cache=use_condition_kv_cache,
             inference_shift=inference_shift,
+            preserve_unmasked_pixels=preserve_unmasked_pixels,
         ).images[0].convert("RGB")
         case_dir = step_dir / f"sample_{case['sample_id']:05d}"
         case_dir.mkdir(parents=True, exist_ok=True)
         generated.save(case_dir / "generated.png")
-        panel = comparison_panel(case, generated, step, case_seed)
+        generation_overlay = None
+        generation_paths = {}
+        generation_mask = getattr(pipe, "last_generation_mask", None)
+        if generation_mask is not None:
+            generation_mask_image = Image.fromarray(
+                generation_mask[0].numpy().astype(np.uint8) * 255,
+            ).resize(case["source"].size, Image.Resampling.NEAREST)
+            generation_mask_image.save(case_dir / "generation_mask.png")
+            generation_overlay = mask_overlay(case["source"], generation_mask_image, color=(255, 165, 0))
+            generation_overlay.save(case_dir / "generation_mask_overlay.png")
+            generation_paths = {
+                "generation_mask_path": str((case_dir / "generation_mask.png").relative_to(step_dir)),
+                "generation_mask_overlay_path": str((case_dir / "generation_mask_overlay.png").relative_to(step_dir)),
+            }
+        panel = comparison_panel(case, generated, step, case_seed, generation_overlay=generation_overlay)
         panel.save(case_dir / "comparison.png")
         panels.append(panel)
         captions.append(f"sample={case['sample_id']} | {case['edit_type']} | {case['instruction']}")
@@ -273,6 +302,8 @@ def run_inter_edit_validation(
             "seed": case_seed, "generated_path": str((case_dir / "generated.png").relative_to(step_dir)),
             "reference_kv_cache": getattr(pipe, "last_reference_cache_info", None),
             "condition_kv_cache": getattr(pipe, "last_condition_cache_info", None),
+            "edit_region": getattr(pipe, "last_edit_region_info", None),
+            **generation_paths,
         })
     contact_sheet = _stack_panels(panels)
     contact_sheet.save(step_dir / "contact_sheet.png")
@@ -286,6 +317,7 @@ def run_inter_edit_validation(
         "edit_only_diffusion": edit_only_diffusion, "sparse_target": sparse_target,
         "sparse_target_halo": sparse_target_halo, "cases": records,
         "supervise_target_halo": getattr(model_config, "supervise_target_halo", False),
+        "preserve_unmasked_pixels": bool(preserve_unmasked_pixels and (edit_only_diffusion or sparse_target)),
         "use_reference_kv_cache": use_reference_kv_cache,
         "reference_kv_cache_threshold": reference_kv_cache_threshold,
         "use_condition_kv_cache": use_condition_kv_cache,
