@@ -200,7 +200,7 @@ class Pipeline(DiffusionPipeline):
         attention_layers: Optional[List[int]] = None,
         attention_keywords: Optional[List[str]] = None,
         sparse_target: Optional[bool] = None,
-        sparse_target_halo: Optional[int] = None,
+        sparse_target_halo: Optional[int] = 0,
         use_reference_kv_cache: bool = True,
         reference_kv_cache_threshold: float = 0.3,
         use_condition_kv_cache: Optional[bool] = None,
@@ -217,7 +217,8 @@ class Pipeline(DiffusionPipeline):
                 For supervise_target_halo checkpoints the generation mask includes halo.
                 Defaults to the checkpoint setting when an edit mask is provided.
             sparse_target_halo (`int`, *optional*):
-                Halo radius on the Transformer grid (default: checkpoint setting).
+                Halo radius on the Transformer grid. Defaults to 0 (no dilation),
+                including for older checkpoints. Explicit None uses the saved radius.
             preserve_unmasked_pixels (`bool`, *optional*, defaults to `True`):
                 For edit-only diffusion, composite decoded RGB inside the ORIGINAL
                 pixel mask onto the source image. Halo tokens still provide context

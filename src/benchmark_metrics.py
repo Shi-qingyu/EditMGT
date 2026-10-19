@@ -92,10 +92,13 @@ class BenchmarkMetrics:
             self.protocol.update(clip_model="ViT-B/32", clip_t_text="target global caption; never the edit instruction")
         if "dino" in names:
             local = dino_repo is not None
+            # The upstream repo/ref is fixed here. Avoid Torch Hub's GitHub
+            # branches/tags API validation, which can hit anonymous rate limits
+            # (and trigger an Authorization KeyError in some Torch versions).
             self.dino = torch.hub.load(
                 str(dino_repo) if local else "facebookresearch/dino:main", "dino_vits16",
                 source="local" if local else "github", pretrained=dino_weights is None,
-                **({} if local else {"trust_repo": True}),
+                **({} if local else {"trust_repo": True, "skip_validation": True}),
             )
             if dino_weights:
                 state = torch.load(dino_weights, map_location="cpu", weights_only=True)

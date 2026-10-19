@@ -13,7 +13,7 @@ from src.mask_schedule import validate_inference_shift
 from src.train_validation import mask_overlay, run_inter_edit_validation
 
 
-def parse_args():
+def parse_args(no_dilation=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--checkpoint", type=Path,
@@ -39,8 +39,8 @@ def parse_args():
                         help="Negative text; empty matches CFG's empty-text training condition.")
     parser.add_argument("--reference-strength", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--sparse-target-halo", type=int, default=1,
-                        help="Transformer-cell halo; default 1 matches train/train_en.sh, including for older checkpoints.")
+    parser.add_argument("--sparse-target-halo", type=int, default=0, choices=[0] if no_dilation else None,
+                        help="Transformer-cell halo; default 0 disables dilation, including for older checkpoints.")
     parser.add_argument("--preserve-unmasked-pixels", action=argparse.BooleanOptionalAction, default=True,
                         help="Copy source pixels outside the original mask; disable to inspect the raw VQ output.")
     parser.add_argument("--disable-reference-kv-cache", action="store_true")
@@ -48,7 +48,30 @@ def parse_args():
                         help="Recompute text/reference while retaining the checkpoint's trained low-noise masks.")
     parser.add_argument("--reference-kv-cache-threshold", type=float, default=0.3)
     parser.add_argument("--bf16", action="store_true", help="Opt into BF16; default is FP32.")
-    return parser.parse_args()
+    parser.set_defaults(no_dilation_profile=no_dilation)
+    if no_dilation:
+        parser.add_argument(
+            "--run-dir", type=Path,
+            default=PROJECT_ROOT / "runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix",
+            help="Corrected-mask no-dilation run; selects its latest checkpoint unless --checkpoint is given.",
+        )
+        parser.set_defaults(
+            checkpoint=None, samples_manifest=None,
+            output_dir=PROJECT_ROOT / "outputs/inter_edit_no_dilation_maskfix",
+        )
+    args = parser.parse_args()
+    if no_dilation:
+        if args.checkpoint is None:
+            checkpoints = [path for path in args.run_dir.glob("checkpoint-*")
+                           if path.is_dir() and path.name.removeprefix("checkpoint-").isdigit()]
+            if not checkpoints:
+                parser.error(f"No training checkpoint under {args.run_dir}; train first or pass --checkpoint.")
+            args.checkpoint = max(checkpoints, key=lambda path: int(path.name.removeprefix("checkpoint-")))
+        if args.samples_manifest is None:
+            # Keep sources, original masks, English prompts and seeds aligned
+            # with THIS run's log previews, rather than a previous experiment.
+            args.samples_manifest = args.checkpoint.parent / "validation/samples.json"
+    return args
 
 
 def prepare_cases(manifest_path, output_dir, resolution):
@@ -80,6 +103,13 @@ def main(args):
     transformer_path = args.checkpoint / "transformer"
     if not (transformer_path / "config.json").is_file():
         raise FileNotFoundError(f"No trained Transformer config at {transformer_path / 'config.json'}")
+    if args.no_dilation_profile:
+        config = json.loads((transformer_path / "config.json").read_text(encoding="utf-8"))
+        if config.get("sparse_target_halo", 0) != 0 or config.get("supervise_target_halo", False):
+            raise ValueError(
+                "The no-dilation entry expects a checkpoint trained with halo=0 and halo supervision disabled. "
+                "Use a checkpoint from scripts/train_en_cache_magicbrush_no_dilation.sh."
+            )
     cases = prepare_cases(args.samples_manifest, args.output_dir, args.resolution)
     pipe = init_edit_mgt(
         device=args.device, enable_bf16=args.bf16,
@@ -117,6 +147,7 @@ def main(args):
         "transformer_path": str(transformer_path.resolve()), "model_path": args.model_path,
         "samples_manifest": str(args.samples_manifest.resolve()),
         "prompt_language": "en", "mask_input": True, "token_type_rope": True, "bf16": args.bf16,
+        "no_dilation_profile": args.no_dilation_profile,
     })
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"Saved {len(cases)} cases to {report['step_dir'] / 'index.html'}", flush=True)

@@ -27,7 +27,11 @@ def expand_edit_mask_for_halo(
     The returned mask has the input shape. Use it for corruption, masked-token
     CE and inference remasking. Keep the ORIGINAL mask for Transformer gather,
     which performs the same dilation exactly once on its own grid.
+    With halo=0, return the original VQ mask without filling whole Transformer
+    cells. Only the attention gather needs the coarser grid alignment.
     """
+    if not isinstance(halo, int) or halo < 0:
+        raise ValueError("sparse_target_halo must be a non-negative integer")
     if edit_mask.ndim == 2:
         if edit_mask.shape[1] != input_grid_size[0] * input_grid_size[1]:
             raise ValueError("Flattened edit mask must match the VQ grid")
@@ -40,6 +44,11 @@ def expand_edit_mask_for_halo(
         source % target for source, target in zip(input_grid_size, grid_size)
     ):
         raise ValueError("The VQ grid must be an integer multiple of the Transformer grid")
+    if halo == 0:
+        # A downsample->upsample round trip would otherwise activate neighbouring
+        # VQ tokens even with dilation disabled. Keep the original generation
+        # and supervision region; the Transformer can still gather its cell.
+        return edit_mask.bool()
     mask_grid = edit_mask.reshape(-1, *input_grid_size).bool()
     active = _active_target_mask(mask_grid, grid_size, halo)
     expanded = F.interpolate(active[:, None].float(), size=input_grid_size, mode="nearest")[:, 0].bool()
@@ -78,9 +87,9 @@ def prepare_sparse_target_layout(
     grid_size: Tuple[int, int],
     batch_size: int,
     device: torch.device,
-    halo: int = 1,
+    halo: int = 0,
 ) -> SparseTargetLayout:
-    """Project VQ-grid edit regions onto the stem grid, then dilate a small halo.
+    """Project VQ-grid edit regions onto the stem grid; optional halo defaults off.
 
     Pooling uses OR/max, so an edit anywhere in a downsampled patch is retained.
     Samples keep their own active sets; only batch padding uses max_active.

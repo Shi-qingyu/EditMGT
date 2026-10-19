@@ -12,6 +12,7 @@ from torch.utils.data import IterableDataset, get_worker_info
 
 from src.dataset_utils import process_edit_sample, tokenize_prompt
 from src.inter_edit_dataset import INTER_EDIT_LANGUAGES, matches_inter_edit_language
+from src.mask_utils import decode_magicbrush_edit_mask
 
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ class MagicBrushDataset(IterableDataset):
         result = process_edit_sample(
             self._decode_image(row["target_img"], path),
             self._decode_image(row["source_img"], path),
-            self._decode_image(row["mask_img"], path),
+            decode_magicbrush_edit_mask(self._decode_image(row["mask_img"], path)),
             self.size, self.norm, ensure_edit_in_crop=True,
         )
         if not result["edit_mask"].any():

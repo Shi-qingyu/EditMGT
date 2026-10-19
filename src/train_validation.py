@@ -171,7 +171,7 @@ def comparison_panel(case, generated, step, seed, generation_overlay=None):
     column_labels = ["Source", "Original edit mask (output ROI)"]
     if generation_overlay is not None:
         images.append(generation_overlay)
-        column_labels.append("Generation tokens + halo")
+        column_labels.append("Generation token mask")
     images.append(case["target"])
     column_labels.append("Ground truth")
     if generated is not None:
@@ -206,7 +206,7 @@ def _write_html_report(output_dir, step_dir, records):
         labels = ["Source", "Original edit mask (output ROI)"]
         if record.get("generation_mask_overlay_path"):
             paths.append(step_dir / record["generation_mask_overlay_path"])
-            labels.append("Generation tokens + halo")
+            labels.append("Generation token mask")
         paths.extend((input_dir / "target.png", step_dir / record["generated_path"]))
         labels.extend(("Ground truth", "Generated"))
         images = "".join(
@@ -224,7 +224,7 @@ def _write_html_report(output_dir, step_dir, records):
     (step_dir / "index.html").write_text(
         f'<!doctype html><meta charset="utf-8"><title>{step_dir.name}</title><style>{style}</style>'
         f'<h1>Inter-Edit test · {step_dir.name}</h1>'
-        '<p>Red: original edit mask. Orange: internal token generation region, including halo. '
+        '<p>Red: original edit mask. Orange: internal token generation region (halo is disabled by default). '
         'When pixel preservation is enabled, only the red region is composited into the final image.</p>'
         + "".join(rows), encoding="utf-8",
     )
@@ -241,7 +241,7 @@ def _write_html_report(output_dir, step_dir, records):
 def run_inter_edit_validation(
     pipe, cases, output_dir, step, num_inference_steps=18, guidance_scale=6.0,
     reference_strength=1.0, seed=42, edit_only_diffusion=True, sparse_target=True,
-    sparse_target_halo=None, negative_prompt=None, use_ema=False,
+    sparse_target_halo=0, negative_prompt=None, use_ema=False,
     use_reference_kv_cache=True, reference_kv_cache_threshold=0.3,
     use_condition_kv_cache=None,
     inference_shift=1.0,
@@ -252,7 +252,7 @@ def run_inter_edit_validation(
         raise ValueError("Inter-Edit validation needs at least one case")
     if sparse_target_halo is None:
         model_config = getattr(getattr(pipe, "transformer", None), "config", None)
-        sparse_target_halo = getattr(model_config, "sparse_target_halo", 1)
+        sparse_target_halo = getattr(model_config, "sparse_target_halo", 0)
     started = time.perf_counter()
     output_dir = Path(output_dir)
     step_dir = output_dir / f"step_{step:06d}"

@@ -8,12 +8,31 @@ import numpy as np
 from PIL import Image, ImageOps
 
 
+MAGICBRUSH_MASK_DECODING = "magicbrush_alpha_cutout_v1"
+
+
 def normalize_edit_mask_image(mask: Image.Image) -> Image.Image:
     """Return a binary L mask, accepting both 0/1 and 0/255 annotations."""
     mask = ImageOps.exif_transpose(mask).convert("L")
     _, maximum = mask.getextrema()
     threshold = 1 if maximum <= 1 else 128
     return mask.point(lambda value: 255 if value >= threshold else 0)
+
+
+def decode_magicbrush_edit_mask(mask: Image.Image) -> Image.Image:
+    """Decode MagicBrush annotations to white=edit, black=preserve.
+
+    The local release stores RGBA source-image cutouts: transparent pixels
+    mark the edit region, while RGB contains scene content, not mask labels.
+    Decode alpha BEFORE any grayscale conversion. L/RGB binary exports retain
+    their usual 0/1 or 0/255 white=edit convention. This interpretation is
+    dataset-specific; generic masks must not have their alpha auto-inverted.
+    """
+    mask = ImageOps.exif_transpose(mask)
+    if "A" in mask.getbands() or (mask.mode == "P" and "transparency" in mask.info):
+        alpha = mask.convert("RGBA").getchannel("A")
+        return ImageOps.invert(alpha).point(lambda value: 255 if value >= 128 else 0)
+    return normalize_edit_mask_image(mask)
 
 
 def resize_binary_edit_mask(mask: Image.Image, size: Tuple[int, int]) -> Image.Image:

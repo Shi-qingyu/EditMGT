@@ -12,9 +12,9 @@ from src.benchmark_utils import (
 )
 
 
-def parse_args():
+def parse_args(native_editmgt=False):
     parser = argparse.ArgumentParser(description=__doc__)
-    add_benchmark_arguments(parser, "magicbrush")
+    add_benchmark_arguments(parser, "magicbrush", native_editmgt=native_editmgt)
     parser.set_defaults(output_dir=None, metrics="l1,l2,clip-i,dino")
     parser.add_argument("--data-dir", type=Path, default=PROJECT_ROOT / "data/magicbrush",
                         help="Defaults to the existing local MagicBrush parquet release.")
@@ -25,9 +25,14 @@ def parse_args():
     parser.add_argument("--caption-file", type=Path, default=None,
                         help="Official global_description.json for CLIP-T; edit instructions are not a substitute.")
     parser.add_argument("--mode", choices=["single", "multi", "both"], default="both")
+    parser.add_argument("--num-gpus", type=int, default=1,
+                        help="Local data-parallel replicas; whole sessions stay on one GPU. Shell launchers default to 8.")
     args = parser.parse_args()
+    if args.num_gpus < 1:
+        parser.error("--num-gpus must be positive")
     if args.output_dir is None:
-        args.output_dir = PROJECT_ROOT / "outputs" / f"benchmark_magicbrush_{args.split}"
+        suffix = "_vanilla" if native_editmgt else ""
+        args.output_dir = PROJECT_ROOT / "outputs" / f"benchmark_magicbrush_{args.split}{suffix}"
     validate_arguments(parser, args)
     return args
 
@@ -57,12 +62,17 @@ def main(args):
             find_captions(args, run.info["settings"]["dataset"]["root"])
             attach_magicbrush_captions(run.selection, args.caption_file)
             names = validate_metric_inputs(args, "magicbrush", run.selection)
-        if args.stage != "metrics":
-            generate_benchmark(args, run, images)
-        if args.stage != "generate":
-            complete = score_benchmark(args, run, images, names)
+        if args.num_gpus > 1:
+            from src.benchmark_parallel import run_magicbrush_data_parallel
+
+            complete = run_magicbrush_data_parallel(args, run, names)
         else:
-            complete = json.loads((run.root / "generation_summary.json").read_text())["complete"]
+            if args.stage != "metrics":
+                generate_benchmark(args, run, images)
+            if args.stage != "generate":
+                complete = score_benchmark(args, run, images, names)
+            else:
+                complete = json.loads((run.root / "generation_summary.json").read_text())["complete"]
         print(f"Saved MagicBrush outputs to {run.root}", flush=True)
         return 0 if complete else 1
     finally:

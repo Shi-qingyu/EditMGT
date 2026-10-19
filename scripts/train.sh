@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Shared training launcher; the Python implementation lives in train/train.py.
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
@@ -66,7 +67,7 @@ exec "${TRAIN_LAUNCH[@]}" train/train.py \
     --train_edit_model True \
     --edit_only_diffusion \
     --sparse_target \
-    --sparse_target_halo "${SPARSE_TARGET_HALO:-1}" \
+    --sparse_target_halo "${SPARSE_TARGET_HALO:-0}" \
     --mask_debug_dir "$TRAIN_OUTPUT_DIR/mask_debug" \
     --output_dir "$TRAIN_OUTPUT_DIR" \
     --train_batch_size 4 \

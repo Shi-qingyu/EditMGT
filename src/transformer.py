@@ -486,7 +486,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         text_encoder_architecture: str = "CLIP",
         connector_type: str = 'none',   # None will not be save
         sparse_target: bool = False,
-        sparse_target_halo: int = 1,
+        sparse_target_halo: int = 0,
         token_type_rope: bool = False,
         cache_conditioning: bool = False,
         condition_cache_threshold: float = 0.3,

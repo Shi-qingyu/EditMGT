@@ -13,6 +13,7 @@ from PIL import Image
 
 from src.benchmark_utils import file_identity, safe_name
 from src.inter_edit_dataset import TarAssetReader
+from src.mask_utils import decode_magicbrush_edit_mask, normalize_edit_mask_image
 
 
 def path_spec(path):
@@ -27,23 +28,32 @@ class BenchmarkImages:
         self.parquet_streams = OrderedDict()
         self.row_cache = OrderedDict()
 
-    def _parquet_row(self, path, index):
+    def _parquet_row(self, path, index, column):
         import pyarrow.parquet as pq
 
-        key = (path, index)
+        key = (path, index, column)
         if key in self.row_cache:
             self.row_cache.move_to_end(key)
             return self.row_cache[key]
-        state = self.parquet_streams.get(path)
+        stream_key = (path, column)
+        state = self.parquet_streams.get(stream_key)
         if state is None or index < state["next"]:
             if state is not None:
                 state["file"].close()
             parquet = pq.ParquetFile(path)
-            columns = [name for name in ("source_img", "target_img", "mask_img") if name in parquet.schema_arrow.names]
-            state = {"file": parquet, "iterator": parquet.iter_batches(batch_size=1, columns=columns, use_threads=False), "next": 0}
-            self.parquet_streams[path] = state
-        self.parquet_streams.move_to_end(path)
-        while len(self.parquet_streams) > 2:
+            if column not in parquet.schema_arrow.names:
+                parquet.close()
+                raise ValueError(f"Missing MagicBrush parquet image column: {column}")
+            # Reading source must not also load GT/mask bytes into memory. In
+            # particular, native generation has no dependency on mask_img.
+            state = {"file": parquet, "iterator": parquet.iter_batches(
+                batch_size=1, columns=[column], use_threads=False,
+            ), "next": 0}
+            self.parquet_streams[stream_key] = state
+        self.parquet_streams.move_to_end(stream_key)
+        # Two files with up to three image columns each. Keeping all columns of
+        # the current file avoids repeatedly rescanning it with --save-inputs.
+        while len(self.parquet_streams) > 6:
             _, previous = self.parquet_streams.popitem(last=False)
             previous["file"].close()
         row = None
@@ -55,33 +65,44 @@ class BenchmarkImages:
             self.row_cache.popitem(last=False)
         return row
 
-    def image(self, spec, mode):
+    @staticmethod
+    def _convert_image(image, mode):
+        # A raw detached copy preserves alpha for dataset-specific mask decoding.
+        return image.copy() if mode is None else image.convert(mode)
+
+    def image(self, spec, mode=None):
         if not spec:
             raise ValueError("Missing image specification")
         if spec["kind"] == "tar":
             root = spec["root"]
             if root not in self.tars:
                 self.tars[root] = TarAssetReader(root, self.tar_cache_dir)
-            return self.tars[root].image(spec["archive"], spec["member"]).convert(mode)
+            return self._convert_image(self.tars[root].image(spec["archive"], spec["member"]), mode)
         if spec["kind"] == "file":
             with Image.open(spec["path"]) as image:
-                return image.convert(mode)
+                return self._convert_image(image, mode)
         if spec["kind"] != "parquet":
             raise ValueError(f"Unknown image specification: {spec['kind']}")
-        value = self._parquet_row(spec["file"], spec["row"])[spec["column"]]
+        value = self._parquet_row(spec["file"], spec["row"], spec["column"])[spec["column"]]
         if isinstance(value, dict):
             value = value.get("bytes") if value.get("bytes") is not None else value.get("path")
         if isinstance(value, (bytes, bytearray, memoryview)):
             with Image.open(io.BytesIO(value)) as image:
-                return image.convert(mode)
+                return self._convert_image(image, mode)
         if isinstance(value, str):
             path = Path(value)
             if not path.is_absolute():
                 candidates = [Path(spec["root"]) / path, Path(spec["file"]).parent / path]
                 path = next((candidate for candidate in candidates if candidate.is_file()), candidates[0])
             with Image.open(path) as image:
-                return image.convert(mode)
+                return self._convert_image(image, mode)
         raise ValueError(f"Missing/invalid {spec['column']} for parquet row {spec['row']}")
+
+    def edit_mask(self, spec, benchmark):
+        image = self.image(spec)
+        if benchmark == "magicbrush":
+            return decode_magicbrush_edit_mask(image)
+        return normalize_edit_mask_image(image)
 
     def close(self):
         for reader in self.tars.values():

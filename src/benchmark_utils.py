@@ -9,6 +9,7 @@ import os
 import re
 import time
 from collections import defaultdict
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from src.mask_schedule import validate_inference_shift
-from src.mask_utils import normalize_edit_mask_image, resize_binary_edit_mask
+from src.mask_utils import MAGICBRUSH_MASK_DECODING, normalize_edit_mask_image, resize_binary_edit_mask
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -56,14 +57,15 @@ def file_identity(path):
     return {"path": str(path), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 
-def add_benchmark_arguments(parser, benchmark):
+def add_benchmark_arguments(parser, benchmark, native_editmgt=False):
     from src.benchmark_metrics import DEFAULT_METRICS
 
     model = parser.add_mutually_exclusive_group()
     model.add_argument("--checkpoint", type=Path, help="Our full or LoRA checkpoint; required for generation unless --vanilla.")
     model.add_argument("--vanilla", action="store_true", help="Use the released EditMGT Transformer.")
     parser.add_argument("--model-path", default=str(PROJECT_ROOT / "checkpoint/EditMGT"))
-    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "outputs" / f"benchmark_{benchmark}")
+    suffix = "_vanilla" if native_editmgt else ""
+    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "outputs" / f"benchmark_{benchmark}{suffix}")
     parser.add_argument("--stage", choices=["all", "generate", "metrics"], default="all")
     parser.add_argument("--resume", action="store_true", help="Reuse completed images only when generation config/selection match.")
     parser.add_argument("--continue-on-error", action="store_true", help="Write failures and continue; incomplete benchmarks exit nonzero.")
@@ -80,8 +82,8 @@ def add_benchmark_arguments(parser, benchmark):
     parser.add_argument("--reference-kv-cache-threshold", type=float, default=0.3)
     parser.add_argument("--disable-reference-kv-cache", action="store_true")
     parser.add_argument("--disable-condition-kv-cache", action="store_true")
-    parser.add_argument("--sparse-target-halo", type=int, default=1,
-                        help="Transformer-cell halo; default 1 matches the English training entry point.")
+    parser.add_argument("--sparse-target-halo", type=int, default=0,
+                        help="Transformer-cell halo; default 0 disables dilation, matching training.")
     parser.add_argument("--preserve-unmasked-pixels", action=argparse.BooleanOptionalAction, default=True,
                         help="Composite only the original mask onto source RGB, including at native output resolution.")
     parser.add_argument("--mask-mode", choices=["provided", "none"], default="provided")
@@ -97,9 +99,31 @@ def add_benchmark_arguments(parser, benchmark):
     parser.add_argument("--alpha-clip-model", default="ViT-L/14")
     parser.add_argument("--dino-repo", type=Path, default=None, help="Optional local facebookresearch/dino clone for offline use.")
     parser.add_argument("--dino-weights", type=Path, default=None)
+    parser.set_defaults(native_editmgt=native_editmgt)
+    if native_editmgt:
+        from src.v2_model import negative_prompt
+
+        # Original dense EditMGT weights and infer.py sampling defaults. These
+        # entry points never accept an editing mask or composite source pixels.
+        parser.set_defaults(
+            vanilla=True, mask_mode="none", num_inference_steps=36,
+            guidance_scale=6.0, reference_strength=1.1, negative_prompt=negative_prompt,
+            sparse_target_halo=0, preserve_unmasked_pixels=False,
+            disable_reference_kv_cache=True, disable_condition_kv_cache=True,
+            reference_kv_cache_threshold=0.0,
+        )
 
 
 def validate_arguments(parser, args):
+    if args.native_editmgt and (
+        args.checkpoint is not None or not args.vanilla or args.mask_mode != "none"
+        or not args.disable_reference_kv_cache or not args.disable_condition_kv_cache
+        or args.preserve_unmasked_pixels or args.sparse_target_halo != 0
+    ):
+        parser.error(
+            "Native EditMGT entries use the released --model-path without a training --checkpoint, "
+            "mask input, sparse target, KV reuse or pixel compositing. Use the general benchmark entry for other protocols."
+        )
     if args.stage != "metrics" and args.checkpoint is None and not args.vanilla:
         parser.error("Generation requires --checkpoint or --vanilla")
     if args.resolution < 32 or args.resolution % 32 or args.num_inference_steps < 1 or args.warmup < 0:
@@ -116,7 +140,7 @@ def validate_arguments(parser, args):
         parser.error("Guidance and reference strength must be finite")
 
 
-def generation_config(args):
+def generation_config(args, benchmark=None):
     keys = ("model_path", "vanilla", "device", "resolution", "num_inference_steps", "inference_shift",
             "guidance_scale", "negative_prompt", "reference_strength", "reference_kv_cache_threshold",
             "disable_reference_kv_cache", "disable_condition_kv_cache", "sparse_target_halo",
@@ -136,6 +160,12 @@ def generation_config(args):
         "original_pixel_mask_at_generation_and_native_resolution"
         if args.mask_mode == "provided" and args.preserve_unmasked_pixels else "none"
     )
+    if args.native_editmgt:
+        config["model_protocol"] = "native_editmgt_mask_free_no_cache"
+    if benchmark == "magicbrush" and args.mask_mode == "provided":
+        # Prevent --resume from mixing images made with the old luminance mask
+        # and the corrected alpha decoder. Mask-free baseline settings stay intact.
+        config["edit_mask_decoding"] = MAGICBRUSH_MASK_DECODING
     return config
 
 
@@ -159,7 +189,7 @@ class BenchmarkRun:
                     raise ValueError("The selected benchmark subset is empty")
                 self.selection = selection
                 generation_selection = [{key: value for key, value in task.items() if key != "caption"} for task in selection]
-                settings = {"benchmark": benchmark, "dataset": dataset, "generation": generation_config(args),
+                settings = {"benchmark": benchmark, "dataset": dataset, "generation": generation_config(args, benchmark),
                             "selection_sha256": hashlib.sha256(json.dumps(generation_selection, sort_keys=True).encode()).hexdigest()}
                 if run_path.exists():
                     self.info = json.loads(run_path.read_text(encoding="utf-8"))
@@ -181,7 +211,8 @@ class BenchmarkRun:
             raise
 
     def close(self):
-        self._lock.close()
+        if self._lock is not None:
+            self._lock.close()
 
     def record_path(self, key):
         return self.root / "records" / (safe_name(key) + ".json")
@@ -212,6 +243,14 @@ class InferenceRunner:
                                   transformer_path=str(transformer_path) if transformer_path else None)
         if checkpoint and transformer_path is None:
             load_lora_adapter(self.pipe.transformer, str(checkpoint))
+        if args.native_editmgt:
+            config = self.pipe.transformer.config
+            if (config.sparse_target or config.token_type_rope or config.cache_conditioning
+                    or config.time_conditioning != "legacy"):
+                raise ValueError(
+                    "Native EditMGT requires the original dense Transformer in --model-path/editmgt; "
+                    "the supplied model enables sparse/type-RoPE/cache-conditioned or normalized-time changes."
+                )
         for module in (self.pipe.transformer, self.pipe.vqvae, self.pipe.text_encoder, self.pipe.text_encoder_t5):
             if module is not None:
                 module.eval().requires_grad_(False)
@@ -228,6 +267,8 @@ class InferenceRunner:
             "supervise_target_halo": self.pipe.transformer.config.supervise_target_halo,
             "warmup_generations_per_process": args.warmup,
         }
+        if args.native_editmgt:
+            self.metadata["model_protocol"] = "native_editmgt_mask_free_no_cache"
 
     @torch.inference_mode()
     def generate(self, source, mask, instruction, seed):
@@ -258,7 +299,8 @@ class InferenceRunner:
                 preserve_unmasked_pixels=args.preserve_unmasked_pixels,
                 use_reference_kv_cache=not args.disable_reference_kv_cache,
                 use_condition_kv_cache=False if args.disable_condition_kv_cache else None,
-                reference_kv_cache_threshold=args.reference_kv_cache_threshold, lora_part_enable=True,
+                reference_kv_cache_threshold=args.reference_kv_cache_threshold,
+                lora_part_enable=not args.native_editmgt,
             ).images[0].convert("RGB")
 
         if not self.warmed_up:
@@ -291,6 +333,13 @@ class InferenceRunner:
                 if provided and args.preserve_unmasked_pixels else "none"
             ),
         }
+        if provided:
+            mask_pixels = np.asarray(mask, dtype=np.uint8) > 0
+            info["input_mask"] = {
+                "size": list(mask.size), "edit_pixels": int(mask_pixels.sum()),
+                "edit_fraction": float(mask_pixels.mean()), "edit_bbox": mask.getbbox(),
+                "native_size": list(native_mask.size), "native_edit_bbox": native_mask.getbbox(),
+            }
         image = image.resize(native_size, Image.Resampling.BICUBIC)
         if provided and args.preserve_unmasked_pixels:
             # Resizing can spread generated colors across a boundary. Apply
@@ -305,11 +354,14 @@ class InferenceRunner:
             torch.cuda.empty_cache()
 
 
-def generate_benchmark(args, run, resolver):
+def generate_benchmark(args, run, resolver, *, output_dir=None, progress_desc="Generate"):
+    # Sharded workers share image/record paths, but keep process metadata and
+    # partial summaries separate until the parent publishes the global result.
+    output_dir = Path(output_dir) if output_dir is not None else run.root
     runner = None
     regenerated = set()
     try:
-        for task in tqdm(run.selection, desc="Generate"):
+        for task in tqdm(run.selection, desc=progress_desc):
             parent = task.get("input_prediction_key")
             previous = run.record(task["key"])
             if (previous and previous["status"] == "ok" and run.image_path(task).is_file()
@@ -325,11 +377,17 @@ def generate_benchmark(args, run, resolver):
                         source = image.convert("RGB")
                 else:
                     source = resolver.image(task["source"], "RGB")
-                mask = resolver.image(task["mask"], "L") if task.get("mask") else None
+                # Annotation masks are not loaded during mask-free generation.
+                # Inter-Edit scoring reads its original masks in the metrics
+                # stage; they never become inputs to native EditMGT.
+                mask = (resolver.edit_mask(task["mask"], run.info["benchmark"])
+                        if args.mask_mode == "provided" and task.get("mask") else None)
                 if runner is None:
                     runner = InferenceRunner(args)
-                    atomic_json(run.root / "execution.json", runner.metadata)
+                    atomic_json(output_dir / "execution.json", runner.metadata)
                 image, info = runner.generate(source, mask, task["instruction"], sample_seed(args.seed, task["seed_key"]))
+                if mask is not None and run.info["benchmark"] == "magicbrush":
+                    info["edit_mask_decoding"] = MAGICBRUSH_MASK_DECODING
                 save_png(run.image_path(task), image)
                 if args.save_inputs:
                     directory = run.root / "inputs" / safe_name(task["key"])
@@ -346,12 +404,21 @@ def generate_benchmark(args, run, resolver):
     finally:
         if runner is not None:
             runner.close()
-        records = [run.record(task["key"]) for task in run.selection]
-        completed = [record for record in records if record and record["status"] == "ok"]
-        atomic_json(run.root / "generation_summary.json", {
-            "expected": len(records), "completed": len(completed), "complete": len(completed) == len(records),
-            "timing": timing_summary(completed),
-        })
+        write_generation_summary(run, output_dir)
+
+
+def write_generation_summary(run, output_dir=None):
+    completed = []
+    for task in run.selection:
+        record = run.record(task["key"])
+        if record and record["status"] == "ok" and run.image_path(task).is_file():
+            completed.append(record)
+    summary = {
+        "expected": len(run.selection), "completed": len(completed),
+        "complete": len(completed) == len(run.selection), "timing": timing_summary(completed),
+    }
+    atomic_json(Path(output_dir or run.root) / "generation_summary.json", summary)
+    return summary
 
 
 def timing_summary(records):
@@ -395,23 +462,33 @@ def metric_summary(rows):
             for name, scores in sorted(values.items())}
 
 
-def score_benchmark(args, run, resolver, names):
+def score_benchmark(args, run, resolver, names, *, output_dir=None, model_lock=None,
+                    progress_desc="Metrics", quiet=False):
     from src.benchmark_metrics import BenchmarkMetrics
 
-    suite = BenchmarkMetrics(
-        run.info["benchmark"], names, device=args.metric_device or args.device,
-        alpha_clip_ckpt=args.alpha_clip_ckpt, alpha_clip_model=args.alpha_clip_model,
-        model_cache_dir=args.model_cache_dir, dino_repo=args.dino_repo, dino_weights=args.dino_weights,
-        metric_resolution=args.metric_resolution,
-    )
+    # Serialize model initialization/downloads across local GPU workers. The
+    # actual scoring runs concurrently after releasing this cache lock.
+    with ExitStack() as stack:
+        if model_lock is not None:
+            import fcntl
+
+            lock = stack.enter_context(Path(model_lock).open("a"))
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        suite = BenchmarkMetrics(
+            run.info["benchmark"], names, device=args.metric_device or args.device,
+            alpha_clip_ckpt=args.alpha_clip_ckpt, alpha_clip_model=args.alpha_clip_model,
+            model_cache_dir=args.model_cache_dir, dino_repo=args.dino_repo, dino_weights=args.dino_weights,
+            metric_resolution=args.metric_resolution,
+        )
     if getattr(args, "caption_file", None):
         suite.protocol["caption_file"] = file_identity(args.caption_file)
-    metrics_dir = run.root / "metrics"
+    metrics_dir = Path(output_dir) if output_dir is not None else run.root / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
+    atomic_json(metrics_dir / "protocol.json", suite.protocol)
     rows, failures, records = [], [], []
     with (metrics_dir / "per_sample.jsonl").open("w", encoding="utf-8") as scores_file, \
             (metrics_dir / "errors.jsonl").open("w", encoding="utf-8") as errors_file:
-        for task in tqdm(run.selection, desc="Metrics"):
+        for task in tqdm(run.selection, desc=progress_desc):
             try:
                 record = run.record(task["key"])
                 if not record or record["status"] != "ok":
@@ -436,9 +513,18 @@ def score_benchmark(args, run, resolver, names):
                 errors_file.flush()
                 if not args.continue_on_error:
                     break
+    summary = build_metric_summary(run, rows, failures, records, suite.protocol)
+    atomic_json(metrics_dir / "summary.json", summary)
+    if not quiet:
+        print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
+    return summary["complete"]
+
+
+def build_metric_summary(run, rows, failures, records, protocol):
+    """Aggregate per-image scores, including shards with unequal sample counts."""
     summary = {
         "benchmark": run.info["benchmark"], "dataset": run.info["settings"]["dataset"],
-        "generation": run.info["settings"]["generation"], "metric_protocol": suite.protocol,
+        "generation": run.info["settings"]["generation"], "metric_protocol": protocol,
         "expected_predictions": len(run.selection), "scored_predictions": len(rows),
         "failed_predictions": len(failures), "unprocessed_predictions": len(run.selection) - len(rows) - len(failures),
         "complete": len(rows) == len(run.selection), "timing": timing_summary(records),
@@ -457,6 +543,4 @@ def score_benchmark(args, run, resolver, names):
                     "metrics": metric_summary([row for row in rows if group in row["groups"]])}
             for group in groups
         }
-    atomic_json(metrics_dir / "summary.json", summary)
-    print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
-    return summary["complete"]
+    return summary

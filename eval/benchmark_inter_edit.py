@@ -13,9 +13,9 @@ from src.inter_edit_dataset import (
 )
 
 
-def parse_args():
+def parse_args(native_editmgt=False):
     parser = argparse.ArgumentParser(description=__doc__)
-    add_benchmark_arguments(parser, "inter_edit")
+    add_benchmark_arguments(parser, "inter_edit", native_editmgt=native_editmgt)
     parser.add_argument("--data-dir", type=Path, default=Path(DEFAULT_INTER_EDIT_ROOT))
     parser.add_argument("--language", choices=["all", "en", "zh"], default="en")
     parser.add_argument("--sample-indices", nargs="+", type=int, default=None,

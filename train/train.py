@@ -30,6 +30,7 @@ from src.dataset_utils import HuggingFaceDataset, HuggingFaceEditDataset, HDFSPa
                                 LocalEditParquetDataset, tokenize_prompt, encode_prompt, move_batch_prompt_device
 from src.v2_model import init_text_encoder, init_base_model, get_pipeline
 from src.mask_utils import (
+    MAGICBRUSH_MASK_DECODING,
     prepare_edit_only_corruption,
     resize_edit_mask_to_tokens,
     save_mask_debug_visualization,
@@ -64,6 +65,55 @@ def make_mask_ratio_sampler(args):
         low_noise_threshold=args.condition_cache_threshold,
         min_mask_ratio=args.min_masking_rate,
     )
+
+
+def prepare_fresh_training_output(args):
+    """Reserve a new run directory without overwriting an existing experiment."""
+    root = Path(args.output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    # Accelerate may create empty logging directories before tracker setup.
+    # Any file or nonempty directory belongs to an existing run and is retained.
+    existing = [path.name for path in root.iterdir()
+                if not (path.is_dir() and not any(path.iterdir()))]
+    if existing:
+        raise FileExistsError(
+            f"Fresh training requires a new output directory; {root} already contains {sorted(existing)[:8]}. "
+            "Select another TRAIN_OUTPUT_DIR or --output_dir. Existing outputs have not been removed."
+        )
+    initialization = {
+        "initialization": "pretrained_editmgt", "initial_global_step": 0,
+        "pretrained_model_name_or_path": args.pretrained_model_name_or_path,
+        "transformer_subfolder": args.transformer_subfolder,
+        "resume_from_checkpoint": None, "sparse_target_halo": args.sparse_target_halo,
+        "supervise_target_halo": args.supervise_target_halo,
+        "timestep_sampling": args.timestep_sampling,
+    }
+    if args.magicbrush_data_dir:
+        initialization["magicbrush_data_dir"] = str(Path(args.magicbrush_data_dir).resolve())
+        initialization["edit_mask_decoding"] = MAGICBRUSH_MASK_DECODING
+    with (root / "run_initialization.json").open("x", encoding="utf-8") as handle:
+        json.dump(initialization, handle, indent=2)
+
+
+def record_resumed_training_output(args, checkpoint, global_step):
+    """Record the origin of a resumed run without rewriting its initial history."""
+    path = Path(args.output_dir) / "run_initialization.json"
+    if path.exists():
+        return
+    initialization = {
+        "initialization": "resumed_checkpoint", "initial_global_step": global_step,
+        "resume_from_checkpoint": str(Path(checkpoint).resolve()),
+        "pretrained_model_name_or_path": args.pretrained_model_name_or_path,
+        "transformer_subfolder": args.transformer_subfolder,
+        "sparse_target_halo": args.sparse_target_halo,
+        "supervise_target_halo": args.supervise_target_halo,
+        "timestep_sampling": args.timestep_sampling,
+    }
+    if args.magicbrush_data_dir:
+        initialization["magicbrush_data_dir"] = str(Path(args.magicbrush_data_dir).resolve())
+        initialization["edit_mask_decoding"] = MAGICBRUSH_MASK_DECODING
+    with path.open("x", encoding="utf-8") as handle:
+        json.dump(initialization, handle, indent=2)
 
 
 def parse_args():
@@ -202,6 +252,14 @@ def parse_args():
     parser.add_argument(
         "--allow_sampler_change_on_resume", action="store_true",
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--require_resume", action="store_true",
+        help="Require checkpoint restoration; never fall back to starting at step 0.",
+    )
+    parser.add_argument(
+        "--fresh_start", action=argparse.BooleanOptionalAction, default=False,
+        help="Start at step 0 from pretrained weights with new optimizer/RNG state; overrides automatic checkpoint resume.",
     )
     parser.add_argument(
         "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
@@ -366,12 +424,12 @@ def parse_args():
         help="Use full reference + sparse edit/halo target tokens; enables --edit_only_diffusion.",
     )
     parser.add_argument(
-        "--sparse_target_halo", type=int, default=1,
-        help="Target-mask dilation radius on the Transformer grid after downsampling.",
+        "--sparse_target_halo", type=int, default=0,
+        help="Target-mask dilation radius on the Transformer grid; default 0 disables dilation.",
     )
     parser.add_argument(
         "--supervise_target_halo", action=argparse.BooleanOptionalAction, default=True,
-        help="Corrupt/supervise the expanded active VQ region; inference composites only the original pixel ROI by default.",
+        help="Supervise halo tokens when halo>0; halo=0 uses only the original VQ edit mask. Output preserves the original pixel ROI.",
     )
     parser.add_argument(
         "--cache_conditioning", action="store_true",
@@ -388,6 +446,12 @@ def parse_args():
         help="Optionally save one source/mask/token-mask alignment panel here.",
     )
     args = parser.parse_args()
+    if args.fresh_start:
+        # Launchers normally supply 'latest'. A fresh run must never restore
+        # its model/optimizer/step from that directory or any explicit path.
+        args.resume_from_checkpoint = None
+    if args.require_resume and (args.fresh_start or args.resume_from_checkpoint is None):
+        parser.error("--require_resume needs --resume_from_checkpoint and cannot be combined with --fresh_start")
     if args.report_to.lower() == "none":
         args.report_to = None
     if args.validation_steps < 0:
@@ -494,7 +558,12 @@ def main(args):
             "Reducing the training batch size does not reduce this initialization allocation."
         ) from error
 
-    if accelerator.is_main_process:
+    if args.fresh_start:
+        synchronized_main_process_call(
+            accelerator, lambda: prepare_fresh_training_output(args),
+            description="Preparing fresh training output",
+        )
+    elif accelerator.is_main_process:
         os.makedirs(args.output_dir, exist_ok=True)
 
     # Make one log on every process with the configuration for debugging.
@@ -791,7 +860,7 @@ def main(args):
         except PackageNotFoundError as error:
             raise ImportError(
                 "8-bit AdamW requires bitsandbytes. Install bitsandbytes==0.48.2 into this "
-                "environment, or use USE_8BIT_ADAM=0 with train/train.sh for PyTorch AdamW."
+                "environment, or use USE_8BIT_ADAM=0 with scripts/train.sh for PyTorch AdamW."
             ) from error
         if (torch.version.cuda is not None and Version(torch.version.cuda) >= Version("13.0")
                 and Version(bnb_version) < Version("0.48.0")):
@@ -926,7 +995,8 @@ def main(args):
                     {"name": "Inter-Edit", "root": str(inter_edit_dataset.reader.root), "split": "train",
                      "sample_count": len(inter_edit_dataset), "probability": 1.0 - args.magicbrush_probability},
                     {"name": "MagicBrush", "root": str(magicbrush_dataset.root.resolve()), "split": "train",
-                     "sample_count": len(magicbrush_dataset), "probability": args.magicbrush_probability},
+                     "sample_count": len(magicbrush_dataset), "probability": args.magicbrush_probability,
+                     "edit_mask_decoding": MAGICBRUSH_MASK_DECODING},
                 ],
                 "validation": {"dataset": "Inter-Edit", "split": "test", "language_filter": args.dataset_language},
             }
@@ -1037,6 +1107,9 @@ def main(args):
     logger.info("  Text condition dropout probability = %s", args.cond_dropout_prob)
     logger.info("  Sparse target halo = %s Transformer cell(s); supervise halo = %s",
                 args.sparse_target_halo, args.supervise_target_halo)
+    if args.fresh_start:
+        logger.info("  Fresh initialization from %s/%s; optimizer and global step start anew",
+                    args.pretrained_model_name_or_path, args.transformer_subfolder)
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info("  Timestep/noise sampling = %s", timestep_sampling_config)
@@ -1054,13 +1127,19 @@ def main(args):
                 resume_from_checkpoint = None
 
         if resume_from_checkpoint is None:
-            accelerator.print(
-                f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
-            )
+            if not args.require_resume:
+                accelerator.print(
+                    f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
+                )
         else:
             cprint('resume successfully!', 'red')
             accelerator.print(f"Resuming from checkpoint {resume_from_checkpoint}")
 
+    if args.require_resume and resume_from_checkpoint is None:
+        raise FileNotFoundError(
+            f"Required checkpoint {args.resume_from_checkpoint!r} was not found under {args.output_dir}; "
+            "refusing to start from step 0."
+        )
     if resume_from_checkpoint is None:
         global_step = 0
         first_epoch = 0
@@ -1068,6 +1147,10 @@ def main(args):
         accelerator.load_state(resume_from_checkpoint)  # load opt and model
         global_step = int(os.path.basename(resume_from_checkpoint).split("-")[1])
         first_epoch = global_step // num_update_steps_per_epoch
+        synchronized_main_process_call(
+            accelerator, lambda: record_resumed_training_output(args, resume_from_checkpoint, global_step),
+            description="Recording resumed training origin",
+        )
 
     if accelerator.is_main_process:
         with open(os.path.join(args.output_dir, "timestep_sampling_config.json"), "w") as f:

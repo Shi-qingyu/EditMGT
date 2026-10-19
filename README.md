@@ -20,7 +20,7 @@ EditMGT edits a source image according to a text instruction. It represents imag
 Think of the model as filling in missing pieces of an image while looking at the original image and reading the edit instruction.
 
 1. **Encode the inputs.** A frozen VQ image encoder converts the source into discrete tokens. Frozen Gemma 2 supplies instruction-token features, while CLIP supplies a global text embedding.
-2. **Prepare the target.** For mask-guided sparse editing, copy source tokens outside the generation region and mask tokens inside it. The original mask plus a small surrounding border, called the **halo**, defines that region for newly trained checkpoints.
+2. **Prepare the target.** For mask-guided sparse editing, copy source tokens outside the generation region and mask tokens inside it. By default, the original VQ-grid edit mask defines that region, with no extra dilation. An optional surrounding border, called the **halo**, can be enabled explicitly.
 3. **Predict visual tokens.** The Transformer attends to the instruction, the full reference image, and the active target tokens. The sampler keeps confident predictions and leaves uncertain positions masked for later steps.
 4. **Decode the result.** Once sampling finishes, the VQ decoder turns the completed token grid back into an image. For mask-guided edit-only inference, composite only the original pixel-mask region onto the source RGB; pixels outside the mask come directly from the source.
 
@@ -29,7 +29,7 @@ flowchart LR
     I[Source image] --> V[Frozen VQ encoder]
     V --> R[Full reference tokens]
     V --> T[Masked target tokens]
-    M[Edit mask + halo] --> T
+    M[Edit mask, no dilation by default] --> T
     P[Edit instruction] --> E[Frozen Gemma 2 + CLIP]
     R --> G[Transformer token predictor]
     T --> G
@@ -55,17 +55,17 @@ The released local configuration in `checkpoint/EditMGT/editmgt/config.json` use
 
 ### Full reference, sparse target
 
-The **reference branch keeps the entire source image**. Only target cells covered by the edit mask and halo pass through the Transformer blocks. Active target features are gathered once before the blocks and scattered back once afterward, before upsampling and token prediction. Original spatial coordinates are retained, with separate position types for text, reference, and target tokens; an additional embedding describes the active region's height and width.
+The **reference branch keeps the entire source image**. Only target cells covered by the edit mask, with an optional halo, pass through the Transformer blocks. Active target features are gathered once before the blocks and scattered back once afterward, before upsampling and token prediction. Original spatial coordinates are retained, with separate position types for text, reference, and target tokens; an additional embedding describes the active region's height and width.
 
-Training defaults to a **halo radius of 1 Transformer cell** and supervises both the edit and halo regions. At 1024 resolution, this adds roughly 32 pixels of context on each side, plus grid alignment. Cross-entropy loss applies only to masked tokens in this expanded generation region; source tokens outside it are copied and receive no loss. Text encoders and the VQ model remain frozen during fine-tuning. All English training launchers inherit the same default through `train/train_en.sh` and `train/train.sh`; `SPARSE_TARGET_HALO` or `--sparse_target_halo` overrides it.
+Training defaults to **halo=0: no dilation**. Corruption, masked-token cross-entropy and inference remasking use the original VQ-grid edit mask. The zero-halo path does not downsample and fill the mask back to whole Transformer cells, which would unnecessarily activate neighbouring VQ tokens. Transformer attention still uses OR projection to select cells that contain editable VQ tokens, without a morphological dilation. Source tokens outside the generation mask are copied and receive no loss. Text encoders and the VQ model remain frozen during fine-tuning. All English training launchers inherit the same zero-halo default through `scripts/train_en.sh` and `scripts/train.sh`; `SPARSE_TARGET_HALO` or `--sparse_target_halo` can explicitly re-enable a halo.
 
-The saved checkpoint controls sparse mode and halo supervision. The sample inference and benchmark scripts default to `--sparse-target-halo 1`, including when loading an older checkpoint trained with two cells. Direct pipeline calls use the saved halo unless `sparse_target_halo` is passed. Changing halo size does not change parameter shapes, so training can resume an older checkpoint using the new one-cell default. Older checkpoints can use a context-only halo; `--no-supervise_target_halo` selects that training behavior. Without an input mask, inference uses the full target sequence.
+The sample inference, validation, pipeline and benchmark defaults all use `sparse_target_halo=0`, including when loading an older checkpoint trained with one or two cells. Passing `sparse_target_halo=None` explicitly to the pipeline/validation helper restores the saved radius for historical reproduction. Changing the halo does not change parameter shapes, so training can resume an older checkpoint with dilation disabled. If a positive halo is explicitly selected, its tokens remain supervised by default; `--no-supervise_target_halo` instead makes it context-only. Without an input mask, inference uses the full target sequence.
 
-The **generation mask** includes the halo and is used for token corruption, supervision and sampling. The **output mask** is the original pixel annotation. `preserve_unmasked_pixels=True` in the pipeline copies source RGB outside the output mask after VQ decoding, including intermediate previews. The sample inference and benchmark scripts expose `--no-preserve-unmasked-pixels` to inspect raw decoded outputs. `output_type="latent"` returns tokens without pixel compositing. This preservation step does not add a VQ encoding pass or change the reference/text cache policy.
+The **generation mask** is the original VQ edit mask by default, or an expanded region if a positive supervised halo is explicitly enabled. The **output mask** is the original pixel annotation. Grid discretization still affects generation boundaries even without dilation. `preserve_unmasked_pixels=True` in the pipeline copies source RGB outside the output mask after VQ decoding, including intermediate previews. This is still a hard composition: disabling dilation reduces the generated area but does not itself remove visible seams where generated and source content disagree. The sample inference and benchmark scripts expose `--no-preserve-unmasked-pixels` to inspect raw decoded outputs. `output_type="latent"` returns tokens without pixel compositing. This preservation step does not add a VQ encoding pass or change the reference/text cache policy.
 
 ### Optional text/reference KV caching
 
-`train/train_en_cache.sh` and its derived launchers train the context branches for reuse during the final, low-noise part of generation. The default transition occurs when the scheduled remaining mask fraction is at most **0.3**:
+`scripts/train_en_cache.sh` and its derived launchers train the context branches for reuse during the final, low-noise part of generation. The default transition occurs when the scheduled remaining mask fraction is at most **0.3**:
 
 | Phase | Text and reference branches | Target branch |
 | --- | --- | --- |
@@ -90,7 +90,7 @@ uv pip install --python .venv/bin/python \
 uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
-This matches the launcher's default CUDA 13.0 package index. Select a suitable PyTorch build for your machine if needed. Automatic setup in `train/train.sh` accepts `TORCH_VERSION`, `TORCHVISION_VERSION`, and `PYTORCH_INDEX_URL` overrides. Subsequent training runs can use `SKIP_INSTALL=1`.
+This matches the launcher's default CUDA 13.0 package index. Select a suitable PyTorch build for your machine if needed. Automatic setup in `scripts/train.sh` accepts `TORCH_VERSION`, `TORCHVISION_VERSION`, and `PYTORCH_INDEX_URL` overrides. Subsequent training runs can use `SKIP_INSTALL=1`.
 
 Download the released checkpoint into `checkpoint/EditMGT` if it is not already present:
 
@@ -147,6 +147,8 @@ Inter-Edit/
 
 [InterEditDataset](src/inter_edit_dataset.py) streams metadata and reads images directly from tar archives. It builds member-offset indexes under `data/inter_edit_tar_index`; no extraction or custom train/test split is required. `--dataset_cache_dir` changes the cache location.
 
+To translate Chinese training instructions into a separate English JSONL with Qwen3.5-9B and vLLM, use [scripts/translate_inter_edit.sh](scripts/translate_inter_edit.sh). It defaults to eight independent GPU replicas and saves each batch for automatic resume; [usage and output format](scripts/README_translate_inter_edit.md) include installation, tensor parallelism, and smoke-test commands.
+
 ### MagicBrush layout and mixture
 
 Place the local parquet release under `data/magicbrush`:
@@ -161,25 +163,28 @@ Each row contains `img_id`, `turn_index`, `instruction`, `source_img`, `target_i
 
 All training samples use **white = edit, black = preserve** masks, accepting both 0/1 and 0/255 encodings. Source, target, and mask receive aligned resizing/cropping; crops are adjusted to retain a localized edit. Mask downsampling preserves thin regions. Empty masks are excluded and logged under the dataset cache's `empty_masks/train/` directories; MagicBrush also excludes missing masks. Data is sharded across ranks/workers, while the original dataset files remain unchanged.
 
+The local MagicBrush `mask_img` is an **RGBA source-image cutout**, with transparent pixels marking the edit region. Its RGB values contain scene colors and must not be thresholded as mask labels. Both training and benchmark readers decode the inverted alpha channel into the white=edit convention before resizing or converting to grayscale. L/RGB binary mask exports retain their existing convention. Mask-guided MagicBrush runs record `edit_mask_decoding=magicbrush_alpha_cutout_v1`; use a new output directory for corrected generation, because `--resume` rejects outputs made with the previous decoder. Mask-free vanilla runs do not consume these masks. Checkpoints previously trained on MagicBrush cutouts used the old masks; correcting inference does not undo that training history.
+
 ## Training
 
 ### Choose a launcher
 
-All variants inherit sparse-target editing, halo supervision, and the base optimization settings from `train/train.sh`.
+All shell training launchers live in `scripts/`; the Python implementation and YAML configurations live in `train/`. All variants inherit sparse-target editing, zero halo by default, and the base optimization settings from `scripts/train.sh`.
 
-| Launcher in `train/` | Data and additional behavior | Default directory under `runs/` |
+| Launcher in `scripts/` | Data and additional behavior | Default directory under `runs/` |
 | --- | --- | --- |
 | `train.sh` | Inter-Edit, all languages | `editmgt_sparse_inter_edit` |
 | `train_en.sh` | English Inter-Edit | `editmgt_sparse_inter_edit_en` |
 | `train_en_cache.sh` | English Inter-Edit + cache conditioning | `editmgt_sparse_inter_edit_en_cache` |
-| `train_en_cache_magicbrush.sh` | English Inter-Edit / MagicBrush mixture + cache conditioning; pure cosine, normalized time, 10% text dropout | `editmgt_sparse_inter_edit_en_cache_magicbrush` |
-| `train_en_cache_magicbrush_lognormal.sh` | Historical filename; alias of the cosine mixed launcher above | `editmgt_sparse_inter_edit_en_cache_magicbrush` |
+| `train_en_cache_magicbrush.sh` | English Inter-Edit / MagicBrush mixture + cache conditioning; corrected alpha masks, pure cosine, normalized time, 10% text dropout | `editmgt_sparse_inter_edit_en_cache_magicbrush_maskfix` |
+| `train_en_cache_magicbrush_no_dilation.sh` | Corrected alpha masks; fresh initialization from original EditMGT; fixed halo=0 and no halo supervision | `editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix` |
+| `train_en_cache_magicbrush_no_dilation_resume.sh` | Corrected alpha masks; initially restore full state from legacy `checkpoint-2600`, then continue latest corrected checkpoint; fixed halo=0 | `editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix` |
 
 For example, train the English/cache-conditioned mixture using an existing environment:
 
 ```bash
 SKIP_INSTALL=1 REPORT_TO=none \
-  bash train/train_en_cache_magicbrush.sh \
+  bash scripts/train_en_cache_magicbrush.sh \
   --instance_data_dir /path/to/Inter-Edit \
   --max_train_steps 10000
 ```
@@ -188,8 +193,38 @@ The launcher respects `CUDA_VISIBLE_DEVICES` and uses one worker per visible GPU
 
 ```bash
 SKIP_INSTALL=1 GPU_IDS=0,1 NUM_PROCESSES=2 REPORT_TO=none \
-  bash train/train_en_cache_magicbrush.sh
+  bash scripts/train_en_cache_magicbrush.sh
 ```
+
+### Fresh no-dilation experiment
+
+Start a separate experiment from the original local EditMGT pretrained weights, with a new optimizer, scheduler state and global step 0:
+
+```bash
+SKIP_INSTALL=1 bash scripts/train_en_cache_magicbrush_no_dilation.sh
+```
+
+This starts fresh fine-tuning of `checkpoint/EditMGT/editmgt`, rather than random initialization of all weights. It keeps the English Inter-Edit / MagicBrush training mixture, cosine sampling, normalized mask-ratio time conditioning, 10% text dropout, complete reference and low-noise text/reference cache policy. Both training and validation fix `sparse_target_halo=0` and disable halo supervision. Corruption, loss and inference remasking use the original VQ edit mask; active Transformer cells still cover their underlying editable tokens without morphological dilation. Pixel output remains composited inside the original annotation mask.
+
+The output directory defaults to `runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix`, separate from the older run trained with incorrectly decoded MagicBrush masks. `--fresh_start` overrides the inherited automatic resume and saves the initialization source and `edit_mask_decoding=magicbrush_alpha_cutout_v1` in `run_initialization.json`. It refuses a directory containing prior output files, so an existing experiment is preserved. For another fresh experiment, set a new `TRAIN_OUTPUT_DIR`. Ordinary optimization options such as learning rate and batch size remain configurable; the profile appends its zero-halo and fresh-start settings after user arguments so those cannot accidentally be overridden.
+
+After training has saved a checkpoint, reproduce its own English validation cases with:
+
+```bash
+bash scripts/infer_inter_edit_no_dilation.sh
+```
+
+This selects the highest `checkpoint-N` in the corrected-mask run directory, loads that run's `validation/samples.json`, and uses halo=0. Use `--run-dir /path/to/new-run` for another run or `--checkpoint /path/to/checkpoint-N` for a specific saved step. The entry accepts only zero-halo checkpoints with halo supervision disabled and does not fall back to an older experiment. Outputs default to `outputs/inter_edit_no_dilation_maskfix`. The general benchmark scripts already default to halo=0 and can evaluate these checkpoints normally.
+
+To resume this experiment later, use the general mixed launcher with the same `TRAIN_OUTPUT_DIR` and `--no-supervise_target_halo --resume_from_checkpoint latest`; omit `--fresh_start`. The dedicated fresh launcher always starts a new experiment.
+
+To continue the existing `runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation/checkpoint-2600` with corrected masks:
+
+```bash
+SKIP_INSTALL=1 bash scripts/train_en_cache_magicbrush_no_dilation_resume.sh
+```
+
+This restores model, optimizer, scheduler and available RNG state at global step 2600, then saves into the separate `_maskfix` run directory above. It retains the previous checkpoint's training history and uses corrected MagicBrush masks for subsequent batches. `run_initialization.json` records the source checkpoint and starting step. Later invocations prefer the latest checkpoint in the corrected run; set `RESUME_FROM_CHECKPOINT=/path/to/checkpoint-N` to select another source explicitly. `--max_train_steps` is the absolute stopping step, including the restored 2600 steps. The preview launcher above follows this same corrected run directory.
 
 ### Main settings
 
@@ -205,7 +240,7 @@ Settings come from the shell launchers and `train/train.py` arguments. `train/tr
 | Gradient clipping | 10 | `--max_grad_norm` |
 | Training length | 500,000 optimizer steps | `--max_train_steps` |
 | Checkpoint / preview interval | 200 / 200 steps | `--checkpointing_steps`, `--validation_steps` |
-| Halo / cache transition | 1 cell / 0.3 mask fraction | `SPARSE_TARGET_HALO`, `CONDITION_CACHE_THRESHOLD` |
+| Halo / cache transition | 0 cells, no dilation / 0.3 mask fraction | `SPARSE_TARGET_HALO`, `CONDITION_CACHE_THRESHOLD` |
 | Text condition dropout | 0.1 in MagicBrush mixed launchers; 0 in other launchers | `COND_DROPOUT_PROB`, `--cond_dropout_prob` |
 | MagicBrush probability | 0.2, in mixed launchers | `MAGICBRUSH_PROBABILITY` |
 | Output directory | Per-launcher directory above | `TRAIN_OUTPUT_DIR` |
@@ -218,7 +253,7 @@ For LoRA and gradient checkpointing:
 
 ```bash
 SKIP_INSTALL=1 REPORT_TO=none TRAIN_OUTPUT_DIR=./runs/editmgt_en_cache_lora \
-  bash train/train_en_cache.sh \
+  bash scripts/train_en_cache.sh \
   --use_lora --lora_r 32 --lora_alpha 128 --gradient_checkpointing
 ```
 
@@ -230,11 +265,11 @@ Let `r` be the fraction of generation-region tokens to mask: `0` is clean and `1
 
 All training launchers use **100% cosine sampling**, with no shift, lognormal draws or mixture components. The shared launcher fixes this recipe, and the sampler rejects other modes. Training draws a uniform progress value `u` and maps it to `r = cos(pi*u/2)`; validation and inference evaluate the same curve at fixed progress values `i/N`.
 
-`train_en_cache_magicbrush.sh` uses normalized `TIME_CONDITIONING=mask_ratio` and `MASK_LOSS_REDUCTION=sample`. Text condition dropout is 0.1: one shared decision replaces both Gemma sequence features and pooled CLIP features with their empty-prompt features. Source/reference conditioning is retained. Validation defaults to an empty negative prompt and preserves RGB outside the original edit mask. The one-cell halo still participates in the training loss.
+`train_en_cache_magicbrush.sh` uses normalized `TIME_CONDITIONING=mask_ratio` and `MASK_LOSS_REDUCTION=sample`. Text condition dropout is 0.1: one shared decision replaces both Gemma sequence features and pooled CLIP features with their empty-prompt features. Source/reference conditioning is retained. Validation defaults to an empty negative prompt and preserves RGB outside the original edit mask. With the default zero halo, loss is restricted to masked tokens in the original VQ edit region.
 
-The historical `train_en_cache_magicbrush_lognormal.sh` filename is retained as an alias for this same cosine launcher. It no longer enables lognormal sampling or selects the old lognormal output directory. Historical checkpoint directories are kept intact and can be explicitly selected for resume or inference.
+The historical lognormal launcher is no longer included. Use `scripts/train_en_cache_magicbrush.sh` for cosine sampling. Historical checkpoint directories can be explicitly selected for resume or inference.
 
-`timestep_sampling_config.json` records the effective cosine recipe. Resuming a historical lognormal, shifted or mixed-noise checkpoint automatically continues with cosine and records the old/new recipes in `sampler_transition.json`; its model, optimizer and step are restored. Saved time conditioning and loss reduction must still match. For a historical normalized-time checkpoint, use `bash train/train_en_cache_magicbrush.sh --resume_from_checkpoint /path/to/checkpoint-N`. A separate output directory retains the old experiment's reports. The old `--allow_sampler_change_on_resume` flag remains accepted for command compatibility and is no longer required.
+`timestep_sampling_config.json` records the effective cosine recipe. Resuming a historical lognormal, shifted or mixed-noise checkpoint automatically continues with cosine and records the old/new recipes in `sampler_transition.json`; its model, optimizer and step are restored. Saved time conditioning and loss reduction must still match. For a historical normalized-time checkpoint, use `bash scripts/train_en_cache_magicbrush.sh --resume_from_checkpoint /path/to/checkpoint-N`. A separate output directory retains the old experiment's reports. The old `--allow_sampler_change_on_resume` flag remains accepted for command compatibility and is no longer required.
 
 ### Checkpoints and previews
 
@@ -260,7 +295,7 @@ The final Transformer is also saved at the run root. LoRA runs save adapter weig
 
 Five fixed Inter-Edit test cases are previewed at startup, every 200 steps, and at the final step, using seed `42 + sample_id`. English launchers select original English test cases across edit types. Ground truth is used for display. Adjust with `--validation_num_images`, `--validation_sample_indices`, or `--validation_steps`; previews are qualitative checks, not full benchmark scores.
 
-Preview contact sheets and HTML reports show the original output mask in red and the token generation mask, including halo, in orange. Each sample directory also saves `generation_mask.png` and `generation_mask_overlay.png`. Metadata records the actual halo, generation-mask coverage and output-compositing policy.
+Preview contact sheets and HTML reports show the original output mask in red and the actual token generation mask in orange. Halo is disabled by default; remaining differences between the overlays come from pixel/VQ discretization. Each sample directory also saves `generation_mask.png` and `generation_mask_overlay.png`. Metadata records the actual halo, generation-mask coverage and output-compositing policy.
 
 ## Inference
 
@@ -306,6 +341,45 @@ Training previews, sparse inference, vanilla inference and both benchmark runner
 
 The standalone runners generate edited images and compute objective metrics. They accept full training checkpoints, final Transformer directories, and LoRA checkpoints through `--checkpoint`. Use `--vanilla` for the released editing Transformer. Common generation defaults are **1024 resolution, 18 steps, guidance 6, reference strength 1.0, seed 42, and provided annotation masks**.
 
+The Python benchmark entries live under `eval/`. The four `scripts/benchmark_*.sh` launchers change to the project root and invoke `python -m eval.benchmark_*`, so they also work when called by absolute path from another directory. Direct Python commands should use the same module form from the project root, for example `python -m eval.benchmark_magicbrush --help`.
+
+### Original EditMGT without masks
+
+Two dedicated entry points evaluate the original dense EditMGT using only source RGB and the edit instruction. They load `checkpoint/EditMGT/editmgt` through the local base model, with no fine-tuned `--checkpoint`, sparse target, token-type RoPE, KV reuse or pixel compositing. Generation does not read annotation masks. Inter-Edit's regional metrics read the annotation masks only during scoring; MagicBrush's default metrics require no masks.
+
+```bash
+# MagicBrush: 8 GPUs, local dev split, independent and continuous editing.
+bash scripts/benchmark_magicbrush_vanilla.sh \
+  --data-dir data/magicbrush --split dev --mode both \
+  --output-dir outputs/benchmark_magicbrush_dev_vanilla
+
+# Inter-Edit: official English test subset; the mask is for metrics only.
+bash scripts/benchmark_inter_edit_vanilla.sh \
+  --language en \
+  --alpha-clip-ckpt /path/to/clip_l14_grit1m_fultune_8xe.pth \
+  --output-dir outputs/benchmark_inter_edit_vanilla
+```
+
+Defaults follow the original `infer.py` sampling settings: **36 steps, guidance 6, reference strength 1.1, FP32**, and the original negative prompt from `src/v2_model.py`. All time schedules use cosine. To match the sparse benchmark's sampling settings, pass `--num-inference-steps 18 --reference-strength 1.0 --negative-prompt ""`. `--model-path` may select another original EditMGT base directory containing `editmgt`, `vqvae` and the frozen encoders. Mask-guided or trained sparse models belong in the general benchmark runners; the native entries reject those settings.
+
+These entries use the same datasets, selection, seed derivation, metric implementations, timing scope and output layout as the sparse benchmarks. MagicBrush defaults to L1, L2, CLIP-I and DINO, with separate single-turn/all-turn and multi-turn/final-turn scores. Inter-Edit defaults to LPIPS, AlphaCLIP inside/outside and the boundary metric. `--metrics lpips,boundary` selects an explicit subset when AlphaCLIP weights are unavailable. Generated PNGs are under `images/`, per-image records under `records/`, and scores under `metrics/per_sample.jsonl` and `metrics/summary.json`. `--resume`, `--limit`, `--stage generate` and `--stage metrics` work as in the general runners.
+
+Both MagicBrush shell launchers default to **8 GPU data parallelism**. Each worker loads a full model on one visible GPU and processes different complete editing sessions. All turns and independent/continuous variants of a session stay on the same GPU, preserving multi-turn dependencies. Tasks are assigned by session size without duplicating or padding samples; fewer selected sessions launch fewer workers. Sampling settings and per-sample seeds are unchanged.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+  bash scripts/benchmark_magicbrush_vanilla.sh
+
+# Select another worker count, including the original single-GPU path.
+NUM_GPUS=1 bash scripts/benchmark_magicbrush_vanilla.sh
+# Or set the worker count on the command line:
+bash scripts/benchmark_magicbrush_vanilla.sh --num-gpus 4
+```
+
+The launchers use the existing `PYTHON_BIN` / `.venv` environment and spawn local Python workers; no separate `torchrun` command is needed. Direct Python entry points default to one GPU and accept `--num-gpus 8`. `--device cuda:N` selects the first of consecutive visible devices; CUDA metric devices follow the same rule, while `--metric-device cpu` scores on CPU.
+
+`--stage all` finishes every generation worker before launching parallel metric workers. Metric-model initialization is serialized to protect shared weight downloads; scoring then runs concurrently. The parent retains the output lock, merges per-image scores into the existing global summaries, and records worker details under `parallel_execution.json` and `workers/<launch-id>/rank-*/`. GPU count can change on `--resume` when generation settings and selection are otherwise identical.
+
 ### Metric dependencies
 
 ```bash
@@ -313,6 +387,8 @@ uv pip install --python .venv/bin/python -r requirements-benchmark.txt
 ```
 
 Inter-Edit's regional metrics additionally require [AlphaCLIP](https://github.com/SunzeY/AlphaCLIP), its dependencies, and matching visual weights, supplied with `--alpha-clip-ckpt`. LPIPS, CLIP, and DINO can download weights on first use. `--model-cache-dir` selects the model cache; offline DINO scoring accepts `--dino-repo` and `--dino-weights`.
+
+DINO loading skips Torch Hub's GitHub branch/tag API validation for the fixed `facebookresearch/dino:main` repository, avoiding API rate-limit errors and the resulting `KeyError: 'Authorization'` in affected Torch versions. The initial repository and weight downloads still require network access unless cached or supplied locally. If generation has finished and metric loading fails, rerun with `--stage metrics --output-dir <existing-output-dir>` to score the saved images without loading EditMGT or generating them again.
 
 ### Inter-Edit test
 
@@ -406,7 +482,7 @@ bash scripts/benchmark_inter_edit.sh \
 
 Metrics-only mode reads the saved run without loading EditMGT; original dataset assets must remain accessible. `--stage all` releases the editing model before loading metric models. Timing includes prompt/VQ encoding, token sampling, and decoding, with one unmeasured warmup by default; disk I/O and scoring are excluded. Reports include peak GPU memory and cache reuse details.
 
-For comparable results, match checkpoint, split/subset, mask protocol, halo, pixel-compositing policy, steps, guidance, precision, cache policy, and metric set. Every runner uses cosine scheduling. The default `--mask-mode provided` supplies annotation masks to the model, uses a one-cell halo, and preserves source pixels outside the original mask. Compositing is applied again at native export resolution so resizing cannot change pixels outside the mask. This policy applies to both vanilla and sparse mask-guided runs and is recorded in run settings and metric summaries; outside-mask preservation metrics therefore include this explicit compositing step. Use `--no-preserve-unmasked-pixels` for raw decoded outputs. `--mask-mode none` selects mask-free inference and disables sparse-target generation and pixel compositing. Partial or failed runs are labeled in summaries and exit with a nonzero status.
+For comparable results, match checkpoint, split/subset, mask protocol, halo, pixel-compositing policy, steps, guidance, precision, cache policy, and metric set. Every runner uses cosine scheduling. The default `--mask-mode provided` supplies annotation masks to the model, disables dilation with halo=0, and preserves source pixels outside the original mask. Compositing is applied again at native export resolution so resizing cannot change pixels outside the mask. This policy applies to both vanilla and sparse mask-guided runs and is recorded in run settings and metric summaries; outside-mask preservation metrics therefore include this explicit compositing step. Use `--no-preserve-unmasked-pixels` for raw decoded outputs. `--mask-mode none` selects mask-free inference and disables sparse-target generation and pixel compositing. Partial or failed runs are labeled in summaries and exit with a nonzero status.
 
 ### GEditBench-EN legacy scripts
 
@@ -439,12 +515,12 @@ These scripts report semantic consistency, perceptual quality, and overall score
 | Entry point | Purpose |
 | --- | --- |
 | `train/train.py` | Training implementation; CLI uses underscore-separated options |
-| `train/train*.sh` | Training presets described above; forward extra arguments |
+| `scripts/train*.sh` | Training presets described above; forward extra arguments |
 | `infer.py` | Released-model example on an asset image |
 | `infer_inter_edit_sparse.py` | Inspect a full sparse checkpoint on exported validation cases |
 | `infer_inter_edit_vanilla.py` | Released-model preview on the same cases, without masks |
-| `benchmark_inter_edit.py` | Official Inter-Edit test generation and scoring |
-| `benchmark_magicbrush.py` | MagicBrush independent and continuous editing evaluation |
+| `eval/benchmark_inter_edit.py` | Official Inter-Edit test generation and scoring |
+| `eval/benchmark_magicbrush.py` | MagicBrush independent and continuous editing evaluation |
 | `scripts/infer_inter_edit_*.sh`, `scripts/benchmark_*.sh` | Wrappers using the existing environment; accept `PYTHON_BIN` |
 | `scripts/analyze_edit_attention.py` | Image/text attention heatmaps, overlays, and region statistics |
 | `scripts/test_zero_shot.py` | Qualitative zero-shot mask/editing experiments |
