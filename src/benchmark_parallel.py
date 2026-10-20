@@ -1,4 +1,4 @@
-"""Single-host, one-model-per-GPU MagicBrush evaluation.
+"""Single-host, one-model-per-GPU benchmark evaluation.
 
 The parent owns BenchmarkRun's directory lock for the entire launch. Spawned
 workers only write disjoint sample files and their own metadata directories.
@@ -62,6 +62,16 @@ def shard_magicbrush_sessions(selection, num_workers):
     return shards
 
 
+def shard_inter_edit_samples(selection, num_workers):
+    """Distribute independent test samples without padding or duplication."""
+    if num_workers < 1:
+        raise ValueError("num_workers must be positive")
+    if not selection:
+        raise ValueError("The selected Inter-Edit subset is empty")
+    num_workers = min(num_workers, len(selection))
+    return [selection[rank::num_workers] for rank in range(num_workers)]
+
+
 def _worker_devices(args, num_workers):
     device = torch.device(args.device)
     metric_device = torch.device(args.metric_device or args.device)
@@ -94,7 +104,7 @@ def _benchmark_worker(rank, args, root, info, shards, names, worker_dirs, device
     elif torch.device(args.metric_device).type == "cuda":
         torch.cuda.set_device(args.metric_device)
     run = _BenchmarkShard(root, info, shards[rank])
-    images = BenchmarkImages()
+    images = BenchmarkImages(getattr(args, "tar_cache_dir", None))
     worker_dir = Path(worker_dirs[rank])
     worker_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -188,8 +198,22 @@ def _merge_metrics(run, names, worker_dirs, parallel_info):
 
 
 def run_magicbrush_data_parallel(args, run, names):
-    """Launch GPU replicas and publish global summaries while holding run's lock."""
     shards = shard_magicbrush_sessions(run.selection, args.num_gpus)
+    return _run_data_parallel(args, run, names, shards, "complete_magicbrush_sessions")
+
+
+def run_inter_edit_data_parallel(args, run, names):
+    shards = shard_inter_edit_samples(run.selection, args.num_gpus)
+    return _run_data_parallel(args, run, names, shards, "independent_inter_edit_samples")
+
+
+def run_pie_bench_data_parallel(args, run, names):
+    shards = shard_inter_edit_samples(run.selection, args.num_gpus)
+    return _run_data_parallel(args, run, names, shards, "independent_pie_bench_samples")
+
+
+def _run_data_parallel(args, run, names, shards, partition):
+    """Launch GPU replicas and publish global summaries while holding run's lock."""
     devices, metric_devices = _worker_devices(args, len(shards))
     # A distinct directory per invocation prevents stale partial scores from a
     # previous launch being merged after a failed or differently sized resume.
@@ -197,16 +221,19 @@ def run_magicbrush_data_parallel(args, run, names):
     worker_dirs = [launch_dir / f"rank-{rank:02d}" for rank in range(len(shards))]
     parallel_info = {
         "mode": "data_parallel", "requested_gpus": args.num_gpus, "world_size": len(shards),
-        "partition": "complete_magicbrush_sessions", "stage": args.stage,
+        "partition": partition, "stage": args.stage,
         "worker_outputs": str(launch_dir.relative_to(run.root)), "workers_finished": False, "phases": {},
         "workers": [
             {"rank": rank, "device": devices[rank], "metric_device": metric_devices[rank],
-             "sessions": len({task["session_id"] for task in shard}), "predictions": len(shard)}
+             "predictions": len(shard),
+             **({"sessions": len({task["session_id"] for task in shard})}
+                if run.info["benchmark"] == "magicbrush" else {})}
             for rank, shard in enumerate(shards)
         ],
     }
     atomic_json(run.root / "parallel_execution.json", parallel_info)
-    print(f"Launching {len(shards)} MagicBrush workers on {', '.join(devices)}", flush=True)
+    label = {"magicbrush": "MagicBrush", "inter_edit": "Inter-Edit", "pie_bench": "PIE-Bench"}[run.info["benchmark"]]
+    print(f"Launching {len(shards)} {label} workers on {', '.join(devices)}", flush=True)
     started = time.perf_counter()
     complete = False
     try:

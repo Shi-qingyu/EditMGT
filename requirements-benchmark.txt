@@ -1,6 +1,12 @@
-# Install explicitly in the existing training environment; benchmark scripts do not install packages.
+# Install into the existing environment with: bash scripts/setup_benchmark_env.sh
+# The installer prepares these build dependencies before building Git packages.
+setuptools<82
+wheel
 lpips==0.1.4
+torchmetrics>=1.0,<2
 git+https://github.com/openai/CLIP.git
-# Inter-Edit alpha-in/alpha-out additionally require AlphaCLIP and its visual weights:
-# https://github.com/SunzeY/AlphaCLIP
+# AlphaCLIP imports loralib but does not declare it in its upstream requirements.
+loralib
+git+https://github.com/SunzeY/AlphaCLIP.git
+# Inter-Edit alpha-in/alpha-out additionally require --alpha-clip-ckpt visual weights.
 # DINO v1 is loaded from facebookresearch/dino, or --dino-repo/--dino-weights for offline use.

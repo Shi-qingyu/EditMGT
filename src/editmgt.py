@@ -6,12 +6,24 @@ from src.scheduler import Scheduler
 from src.pipeline import Pipeline
 from src.transformer import Transformer2DModel
 
+
+def set_inference_cache_threshold(transformer, threshold=0.8):
+    """Apply the requested prefix phase after loading full or LoRA weights."""
+    transformer = getattr(transformer, "_orig_mod", transformer)
+    if threshold is None or not getattr(transformer.config, "cache_conditioning", False):
+        return
+    if not hasattr(transformer, "_loaded_condition_cache_threshold"):
+        transformer._loaded_condition_cache_threshold = transformer.config.condition_cache_threshold
+    transformer.enable_condition_cache_training(threshold=threshold)
+
+
 def init_edit_mgt(
     device,
     enable_bf16=False,
     base_model_path='WeiChow/EditMGT',
     transformer_subfolder='editmgt',
     transformer_path=None,
+    condition_cache_threshold=0.8,
 ):
     text_encoder_clip = CLIPTextModelWithProjection.from_pretrained(
         base_model_path, subfolder="text_encoder"
@@ -44,6 +56,9 @@ def init_edit_mgt(
             transformer_source, subfolder=transformer_source_subfolder
         )
     
+    # A checkpoint may still store the historical 0.3 phase. Set the runtime
+    # phase before the pipeline caps capture by the model's configured phase.
+    set_inference_cache_threshold(model, condition_cache_threshold)
     pipe = Pipeline(
         transformer=model,
         tokenizer=tokenizer[0],

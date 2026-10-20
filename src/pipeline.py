@@ -202,10 +202,12 @@ class Pipeline(DiffusionPipeline):
         sparse_target: Optional[bool] = None,
         sparse_target_halo: Optional[int] = 0,
         use_reference_kv_cache: bool = True,
-        reference_kv_cache_threshold: float = 0.3,
+        reference_kv_cache_threshold: float = 0.8,
         use_condition_kv_cache: Optional[bool] = None,
         inference_shift: Optional[float] = None,
-        preserve_unmasked_pixels: bool = True,
+        preserve_unmasked_pixels: bool = False,
+        condition_kv_cache_reuse_steps: Optional[int] = None,
+        allow_early_condition_cache: bool = False,
     ):
         """
         The call function to the pipeline for generation.
@@ -219,12 +221,12 @@ class Pipeline(DiffusionPipeline):
             sparse_target_halo (`int`, *optional*):
                 Halo radius on the Transformer grid. Defaults to 0 (no dilation),
                 including for older checkpoints. Explicit None uses the saved radius.
-            preserve_unmasked_pixels (`bool`, *optional*, defaults to `True`):
-                For edit-only diffusion, composite decoded RGB inside the ORIGINAL
-                pixel mask onto the source image. Halo tokens still provide context
-                and denoise normally, but cannot change the output outside this mask.
-                This applies to decoded outputs, including intermediate previews;
-                output_type="latent" returns the generation latents without compositing.
+            preserve_unmasked_pixels (`bool`, *optional*, defaults to `False`):
+                By default, preserve source tokens outside the generation mask and
+                decode the complete token grid without RGB compositing, including
+                intermediate previews. True opts into copying source RGB outside
+                the ORIGINAL pixel mask after decoding for historical reproduction.
+                output_type="latent" always returns tokens without RGB compositing.
             inference_shift (`float`, *optional*):
                 Compatibility argument; only 1.0 is accepted. All generations,
                 previews and benchmarks use the unshifted cosine mask schedule.
@@ -232,7 +234,7 @@ class Pipeline(DiffusionPipeline):
                 Capture full per-layer reference K/V once at the low-noise
                 transition, then pass only text and target through the model.
                 The cache is local to this generation and never stores target K/V.
-            reference_kv_cache_threshold (`float`, *optional*, defaults to `0.3`):
+            reference_kv_cache_threshold (`float`, *optional*, defaults to `0.8`):
                 Start capture when the scheduled remaining editable mask fraction
                 is at most this value (0..1). This uses the cosine
                 schedule before each forward, without reading GPU token counts.
@@ -243,6 +245,16 @@ class Pipeline(DiffusionPipeline):
                 Cache both text and complete reference for cache_conditioning
                 checkpoints. Defaults to use_reference_kv_cache for those models.
                 False disables reuse while retaining trained masks/modulation.
+            condition_kv_cache_reuse_steps (`int`, *optional*):
+                Exact number of final forwards that reuse text/reference KV.
+                Prefill occurs at index N - reuse_steps - 1 and is not counted.
+                Overrides the capture threshold when provided; zero disables
+                capture. Requires joint condition caching for positive counts.
+            allow_early_condition_cache (`bool`, *optional*, defaults to `False`):
+                Allow an explicit reuse count to capture before the checkpoint's
+                trained low-noise phase. This freezes a target-dependent context
+                snapshot and is an approximation, including after the phase
+                transition. It does not change saved attention/modulation rules.
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide image generation. If not defined, you need to pass `prompt_embeds`.
             height (`int`, *optional*, defaults to `self.transformer.config.sample_size * self.vae_scale_factor`):
@@ -338,6 +350,13 @@ class Pipeline(DiffusionPipeline):
             raise ValueError("Joint text/reference caching requires a cache_conditioning checkpoint")
         use_condition_kv_cache = (cache_conditioning and use_reference_kv_cache
                                   if use_condition_kv_cache is None else use_condition_kv_cache)
+        if condition_kv_cache_reuse_steps is not None:
+            if (isinstance(condition_kv_cache_reuse_steps, bool)
+                    or not isinstance(condition_kv_cache_reuse_steps, int)
+                    or not 0 <= condition_kv_cache_reuse_steps < num_inference_steps):
+                raise ValueError("condition_kv_cache_reuse_steps must be an integer in [0, num_inference_steps)")
+            if condition_kv_cache_reuse_steps and not (cache_conditioning and use_condition_kv_cache):
+                raise ValueError("Positive exact reuse counts require enabled joint text/reference caching")
 
         if (prompt_embeds is not None and encoder_hidden_states is None) or (
             prompt_embeds is None and encoder_hidden_states is not None
@@ -565,17 +584,30 @@ class Pipeline(DiffusionPipeline):
                                     for p in self.transformer.attn_processors.values()))
         cache_enabled = ((use_condition_kv_cache and not live_text_queries) if cache_conditioning
                          else use_reference_kv_cache)
-        if cache_enabled and reference_image is not None and capture_threshold > 0:
+        approximate_early_snapshot = False
+        if condition_kv_cache_reuse_steps:
+            if not cache_enabled or reference_image is None:
+                raise ValueError("Exact KV reuse requires reference inputs and no live attention-query reports")
+            cache_capture_step = len(self.scheduler.timesteps) - condition_kv_cache_reuse_steps - 1
+            capture_threshold = mask_ratios[cache_capture_step]
+            approximate_early_snapshot = capture_threshold > self.transformer.config.condition_cache_threshold
+            if approximate_early_snapshot and not allow_early_condition_cache:
+                raise ValueError(
+                    "The requested reuse count captures before the trained low-noise phase. "
+                    "Set allow_early_condition_cache=True for an approximate early snapshot."
+                )
+        elif (condition_kv_cache_reuse_steps is None and cache_enabled
+              and reference_image is not None and capture_threshold > 0):
             # Never spend memory capturing a cache if no later step can reuse it.
             cache_capture_step = next((
                 step for step in range(max(0, len(self.scheduler.timesteps) - 1))
                 if mask_ratios[step] <= capture_threshold
             ), None)
-            if cache_capture_step is not None:
-                if cache_conditioning:
-                    condition_kv_cache = ConditionKVCache()
-                else:
-                    reference_kv_cache = ReferenceKVCache()
+        if cache_capture_step is not None:
+            if cache_conditioning:
+                condition_kv_cache = ConditionKVCache(allow_early_capture=approximate_early_snapshot)
+            else:
+                reference_kv_cache = ReferenceKVCache()
         self.last_reference_cache_info = {
             "enabled": reference_kv_cache is not None,
             "inference_shift": self.scheduler.inference_shift,
@@ -591,6 +623,11 @@ class Pipeline(DiffusionPipeline):
             "capture_step": cache_capture_step if condition_kv_cache is not None else None,
             "reuse_steps": [], "cached_branches": ["text", "reference"] if condition_kv_cache is not None else [],
             "disabled_for_live_text_queries": bool(cache_conditioning and live_text_queries),
+            "requested_reuse_steps": condition_kv_cache_reuse_steps,
+            "approximate_early_snapshot": approximate_early_snapshot,
+            "allow_early_capture": bool(allow_early_condition_cache),
+            "cache_mode": ("early_snapshot" if approximate_early_snapshot else
+                           "trained_low_noise" if condition_kv_cache is not None else "none"),
         }
         if condition_kv_cache is not None:
             self.last_reference_cache_info = self.last_condition_cache_info
@@ -605,14 +642,14 @@ class Pipeline(DiffusionPipeline):
                     model_input = latents
 
                 step_mask_ratio = mask_ratios[i]
-                # New checkpoints derive model time from step_mask_ratio.
-                # Legacy checkpoints retain their original step-ID time units.
+                # Both modes condition on the scheduled unresolved fraction.
+                # Legacy inputs use r*1000 to match historical training units.
                 model_timestep = None
                 if self.transformer.config.time_conditioning == "legacy":
                     model_timestep = torch.full(
                         (model_input.shape[0],), self.scheduler.conditioning_timesteps[i],
                         device=model_input.device,
-                        dtype=torch.long,
+                        dtype=torch.float32,
                     )
 
                 # image edit

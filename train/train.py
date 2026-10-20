@@ -32,12 +32,14 @@ from src.v2_model import init_text_encoder, init_base_model, get_pipeline
 from src.mask_utils import (
     MAGICBRUSH_MASK_DECODING,
     prepare_edit_only_corruption,
+    random_mask_to_bbox,
     resize_edit_mask_to_tokens,
     save_mask_debug_visualization,
 )
-from src.inter_edit_dataset import DEFAULT_INTER_EDIT_ROOT, InterEditDataset
-from src.magicbrush_dataset import MagicBrushDataset
-from src.mixed_edit_dataset import MixedEditDataset
+from src.inter_edit_dataset import DEFAULT_INTER_EDIT_ROOT
+from src.maskedit_dataset import MASKEDIT_CONFIGS
+from src.training_data import build_inter_edit_training_data, edit_data_probabilities, write_data_mixture_info
+from src.training_resume import condition_cache_transition, record_condition_cache_transition
 from src.timestep_sampling import MaskRatioSampler
 from src.sparse_utils import expand_edit_mask_for_halo
 from src.mask_schedule import validate_inference_shift
@@ -68,18 +70,9 @@ def make_mask_ratio_sampler(args):
 
 
 def prepare_fresh_training_output(args):
-    """Reserve a new run directory without overwriting an existing experiment."""
+    """Prepare step-zero initialization metadata in the requested directory."""
     root = Path(args.output_dir)
     root.mkdir(parents=True, exist_ok=True)
-    # Accelerate may create empty logging directories before tracker setup.
-    # Any file or nonempty directory belongs to an existing run and is retained.
-    existing = [path.name for path in root.iterdir()
-                if not (path.is_dir() and not any(path.iterdir()))]
-    if existing:
-        raise FileExistsError(
-            f"Fresh training requires a new output directory; {root} already contains {sorted(existing)[:8]}. "
-            "Select another TRAIN_OUTPUT_DIR or --output_dir. Existing outputs have not been removed."
-        )
     initialization = {
         "initialization": "pretrained_editmgt", "initial_global_step": 0,
         "pretrained_model_name_or_path": args.pretrained_model_name_or_path,
@@ -87,11 +80,12 @@ def prepare_fresh_training_output(args):
         "resume_from_checkpoint": None, "sparse_target_halo": args.sparse_target_halo,
         "supervise_target_halo": args.supervise_target_halo,
         "timestep_sampling": args.timestep_sampling,
+        "mask_bbox_prob": args.mask_bbox_prob,
     }
     if args.magicbrush_data_dir:
         initialization["magicbrush_data_dir"] = str(Path(args.magicbrush_data_dir).resolve())
         initialization["edit_mask_decoding"] = MAGICBRUSH_MASK_DECODING
-    with (root / "run_initialization.json").open("x", encoding="utf-8") as handle:
+    with (root / "run_initialization.json").open("w", encoding="utf-8") as handle:
         json.dump(initialization, handle, indent=2)
 
 
@@ -108,6 +102,7 @@ def record_resumed_training_output(args, checkpoint, global_step):
         "sparse_target_halo": args.sparse_target_halo,
         "supervise_target_halo": args.supervise_target_halo,
         "timestep_sampling": args.timestep_sampling,
+        "mask_bbox_prob": args.mask_bbox_prob,
     }
     if args.magicbrush_data_dir:
         initialization["magicbrush_data_dir"] = str(Path(args.magicbrush_data_dir).resolve())
@@ -254,12 +249,16 @@ def parse_args():
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--allow_condition_cache_threshold_change_on_resume", action=argparse.BooleanOptionalAction, default=True,
+        help="Adapt the saved cache threshold while restoring full training state (enabled by default).",
+    )
+    parser.add_argument(
         "--require_resume", action="store_true",
         help="Require checkpoint restoration; never fall back to starting at step 0.",
     )
     parser.add_argument(
         "--fresh_start", action=argparse.BooleanOptionalAction, default=False,
-        help="Start at step 0 from pretrained weights with new optimizer/RNG state; overrides automatic checkpoint resume.",
+        help="Start at step 0 from pretrained weights with new optimizer/RNG state; overrides automatic checkpoint resume and permits an existing output directory.",
     )
     parser.add_argument(
         "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
@@ -302,6 +301,8 @@ def parse_args():
     )
     parser.add_argument("--validation_data_dir", type=str, default=None,
                         help="Inter-Edit root for test visualizations (defaults to the training data root).")
+    parser.add_argument("--validation_translations_dir", type=str, default=None,
+                        help="Optional completed TEST translation release; include translated Chinese cases in English previews.")
     parser.add_argument("--validation_num_images", type=int, default=5,
                         help="Fixed test cases, choosing different edit types first.")
     parser.add_argument("--validation_sample_indices", type=int, nargs="+", default=None,
@@ -315,7 +316,7 @@ def parse_args():
     parser.add_argument("--validation_reference_strength", type=float, default=1.0)
     parser.add_argument("--validation_disable_reference_kv_cache", action="store_true",
                         help="Recompute the full reference at every validation inference step.")
-    parser.add_argument("--validation_reference_kv_cache_threshold", type=float, default=0.3,
+    parser.add_argument("--validation_reference_kv_cache_threshold", type=float, default=0.8,
                         help="Capture reference K/V when the scheduled remaining editable mask fraction is <= this value.")
     parser.add_argument("--validation_seed", type=int, default=42)
     parser.add_argument("--validation_at_start", action="store_true",
@@ -362,15 +363,26 @@ def parse_args():
         help="Writable tar member-index cache for InterEditDataset (default: data/inter_edit_tar_index).",
     )
     parser.add_argument(
+        "--inter_edit_translations_dir", type=str, default=None,
+        help="Completed Qwen translation output; replace Chinese train prompts before language filtering/tokenization.",
+    )
+    parser.add_argument(
         "--magicbrush_data_dir", type=str, default=None,
         help="Optional local MagicBrush release to mix with Inter-Edit; only train-*.parquet is used.",
     )
     parser.add_argument(
         "--magicbrush_probability", type=float, default=0.2,
-        help="Per-example MagicBrush sampling probability when mixing; Inter-Edit receives the remaining weight.",
+        help="Per-example MagicBrush probability; Inter-Edit receives 1 - MagicBrush - MaskEdit.",
     )
     parser.add_argument("--magicbrush_read_batch_size", type=int, default=4,
                         help="Bound the number of image-containing parquet rows materialized together per worker.")
+    parser.add_argument("--maskedit_data_dir", type=str, default=None,
+                        help="Optional MaskEdit-10K train data; exclude Chinese content and instructions containing Han characters.")
+    parser.add_argument("--maskedit_probability", type=float, default=0.1)
+    parser.add_argument("--maskedit_configs", nargs="+", choices=MASKEDIT_CONFIGS, default=list(MASKEDIT_CONFIGS),
+                        help="Non-Chinese training configurations; infographics_cn is excluded.")
+    parser.add_argument("--maskedit_prompt_field", choices=("edit_instruction", "prompt"), default="edit_instruction")
+    parser.add_argument("--maskedit_read_batch_size", type=int, default=4)
     parser.add_argument("--min_masking_rate", type=float, default=0.0)
     parser.add_argument(
         "--timestep_sampling", choices=["cosine"], default="cosine",
@@ -420,6 +432,13 @@ def parse_args():
         help="Corrupt/supervise the edit-generation region (including halo when enabled); preserve tokens come from source.",
     )
     parser.add_argument(
+        "--mask_bbox_prob", type=float, default=0.0,
+        help=(
+            "Per-example probability of replacing the aligned training edit mask with its filled bounding box "
+            "before VQ projection; requires --edit_only_diffusion/--sparse_target. Validation keeps annotation masks."
+        ),
+    )
+    parser.add_argument(
         "--sparse_target", action="store_true",
         help="Use full reference + sparse edit/halo target tokens; enables --edit_only_diffusion.",
     )
@@ -429,14 +448,14 @@ def parse_args():
     )
     parser.add_argument(
         "--supervise_target_halo", action=argparse.BooleanOptionalAction, default=True,
-        help="Supervise halo tokens when halo>0; halo=0 uses only the original VQ edit mask. Output preserves the original pixel ROI.",
+        help="Supervise halo tokens when halo>0; halo=0 uses only the VQ edit mask (after optional bbox augmentation).",
     )
     parser.add_argument(
         "--cache_conditioning", action="store_true",
         help="Train low-noise target-independent text/reference prefixes with fixed modulation for joint KV reuse.",
     )
     parser.add_argument(
-        "--condition_cache_threshold", type=float, default=0.3,
+        "--condition_cache_threshold", type=float, default=0.8,
         help="Scheduled edit-mask ratio below which prefix isolation/fixed context modulation apply.",
     )
     parser.add_argument(
@@ -466,14 +485,23 @@ def parse_args():
         parser.error("--sparse_target_halo must be non-negative")
     if args.dataset_language != "all" and args.instance_dataset != "InterEditDataset":
         parser.error("--dataset_language is supported only for InterEditDataset")
-    if args.magicbrush_data_dir and (
+    if (args.magicbrush_data_dir or args.maskedit_data_dir or args.inter_edit_translations_dir) and (
         args.instance_dataset != "InterEditDataset" or args.dataset_split != "train" or not args.train_edit_model
     ):
-        parser.error("MagicBrush mixing requires InterEditDataset, --dataset_split train and --train_edit_model")
-    if not 0.0 < args.magicbrush_probability < 1.0 or args.magicbrush_read_batch_size < 1:
-        parser.error("MagicBrush probability must be in (0,1) and its read batch size must be positive")
+        parser.error("Translations/MagicBrush/MaskEdit require InterEditDataset, --dataset_split train and --train_edit_model")
+    try:
+        edit_data_probabilities(bool(args.magicbrush_data_dir), args.magicbrush_probability,
+                                bool(args.maskedit_data_dir), args.maskedit_probability)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.magicbrush_read_batch_size < 1 or args.maskedit_read_batch_size < 1:
+        parser.error("MagicBrush and MaskEdit read batch sizes must be positive")
     if args.sparse_target:
         args.edit_only_diffusion = True
+    if not 0.0 <= args.mask_bbox_prob <= 1.0:
+        parser.error("--mask_bbox_prob must be between 0 and 1")
+    if args.mask_bbox_prob > 0.0 and not args.edit_only_diffusion:
+        parser.error("--mask_bbox_prob requires --edit_only_diffusion/--sparse_target")
     if not 0.0 < args.condition_cache_threshold <= 1.0:
         parser.error("--condition_cache_threshold must be in (0,1]")
     if args.cache_conditioning and not args.train_edit_model:
@@ -526,6 +554,7 @@ def main(args):
         "mask_loss_reduction": args.mask_loss_reduction,
         "sampler": mask_ratio_sampler.to_dict(),
     }
+    mask_augmentation_config = {"mask_bbox_prob": args.mask_bbox_prob}
     if args.allow_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -612,6 +641,7 @@ def main(args):
                 validation_data_dir, validation_output_dir, args.resolution,
                 num_images=args.validation_num_images, sample_indices=args.validation_sample_indices,
                 cache_dir=args.dataset_cache_dir, language=args.dataset_language,
+                translations_dir=args.validation_translations_dir,
             ),
             description="Loading Inter-Edit test visualization cases",
         )
@@ -715,6 +745,8 @@ def main(args):
         if accelerator.is_main_process:
             with open(os.path.join(output_dir, "timestep_sampling_config.json"), "w") as f:
                 json.dump(timestep_sampling_config, f, indent=2)
+            with open(os.path.join(output_dir, "mask_augmentation_config.json"), "w") as f:
+                json.dump(mask_augmentation_config, f, indent=2)
             transformer_lora_layers_to_save = None
 
             for model_ in models:
@@ -800,27 +832,43 @@ def main(args):
                             saved_time_mode = json.load(f)["time_conditioning"]
                     if model_.config.time_conditioning != saved_time_mode:
                         raise ValueError("LoRA checkpoint time conditioning differs from --time_conditioning")
+                    cache_config_path = Path(input_dir) / "condition_cache_config.json"
+                    saved_cache_config = {"cache_conditioning": False}
+                    if cache_config_path.is_file():
+                        with cache_config_path.open() as f:
+                            saved_cache_config = {**json.load(f), "cache_conditioning": True}
                     transformer = model_
                 else:
                     load_model = Transformer2DModel.from_pretrained(os.path.join(input_dir, "transformer"),low_cpu_mem_usage=False,device_map=None)
                     if model_.config.time_conditioning != load_model.config.time_conditioning:
                         raise ValueError("Checkpoint time conditioning differs from --time_conditioning")
-                    if (model_.config.cache_conditioning != load_model.config.cache_conditioning or
-                        (model_.config.cache_conditioning and
-                         model_.config.condition_cache_threshold != load_model.config.condition_cache_threshold)):
-                        raise ValueError(
-                            "Checkpoint cache-conditioning settings differ from this run; "
-                            "use matching --cache_conditioning/--condition_cache_threshold or a separate output directory."
-                        )
+                    saved_cache_config = load_model.config
+                cache_transition = condition_cache_transition(
+                    saved_cache_config, model_.config,
+                    allow_threshold_change=args.allow_condition_cache_threshold_change_on_resume,
+                )
+                if not args.use_lora:
                     # Diffusers checkpoints store the original model's keys.
                     # Load into that model regardless of compile/DDP wrappers.
                     model_.load_state_dict(load_model.state_dict())
                     del load_model
+                if cache_transition is not None:
+                    logger.warning(
+                        "Resuming %s with condition-cache threshold %s -> %s. "
+                        "Further training must adapt to the changed condition-prefix attention phase.",
+                        input_dir, cache_transition["previous_threshold"], cache_transition["current_threshold"],
+                    )
+                    if accelerator.is_main_process:
+                        record_condition_cache_transition(args.output_dir, input_dir, cache_transition)
             else:
                 raise ValueError(f"unexpected save model: {model.__class__}")
 
         if transformer is not None:
             transformer = load_lora_adapter(transformer, input_dir)
+            if args.cache_conditioning:
+                # Adapter loading restores the old config; retain the explicitly
+                # validated threshold requested for this continued training run.
+                transformer.enable_condition_cache_training(threshold=args.condition_cache_threshold)
             if args.sparse_target:
                 # Explicit training options govern the new objective even when
                 # continuing a previous context-only LoRA checkpoint.
@@ -959,52 +1007,14 @@ def main(args):
             require_edit_mask=args.edit_only_diffusion,
         )
     elif args.instance_dataset == "InterEditDataset":
-        dataset = InterEditDataset(
-            root_dir=args.instance_data_dir, split=args.dataset_split,
-            tokenizer=tokenizer, size=args.resolution,
-            text_encoder_architecture=args.text_encoder_architecture,
-            rank=accelerator.process_index, world_size=accelerator.num_processes,
-            cache_dir=args.dataset_cache_dir, seed=args.seed if args.seed is not None else 42,
-            language=args.dataset_language,
+        dataset, mixture_info = build_inter_edit_training_data(
+            args, tokenizer, accelerator.process_index, accelerator.num_processes,
         )
-        logger.info("Inter-Edit rank %s: %s %s samples, language=%s (before empty-mask filtering)",
-                    accelerator.process_index, len(dataset), args.dataset_split, args.dataset_language)
-        if args.magicbrush_data_dir:
-            inter_edit_dataset = dataset
-            magicbrush_dataset = MagicBrushDataset(
-                root_dir=args.magicbrush_data_dir, split="train",
-                tokenizer=tokenizer, size=args.resolution,
-                text_encoder_architecture=args.text_encoder_architecture,
-                rank=accelerator.process_index, world_size=accelerator.num_processes,
-                seed=args.seed if args.seed is not None else 42, language=args.dataset_language,
-                cache_dir=Path(args.dataset_cache_dir) / "magicbrush" if args.dataset_cache_dir else None,
-                read_batch_size=args.magicbrush_read_batch_size,
-            )
-            dataset = MixedEditDataset(
-                datasets=[inter_edit_dataset, magicbrush_dataset], names=["Inter-Edit", "MagicBrush"],
-                weights=[1.0 - args.magicbrush_probability, args.magicbrush_probability],
-                rank=accelerator.process_index, seed=args.seed if args.seed is not None else 42,
-            )
-            mixture_dir = Path(args.output_dir) / "data_mixture"
-            mixture_dir.mkdir(parents=True, exist_ok=True)
-            mixture_info = {
-                "rank": accelerator.process_index, "world_size": accelerator.num_processes,
-                "language_filter": args.dataset_language,
-                "count_scope": "rank-local, language-filtered, before empty-mask exclusions",
-                "sources": [
-                    {"name": "Inter-Edit", "root": str(inter_edit_dataset.reader.root), "split": "train",
-                     "sample_count": len(inter_edit_dataset), "probability": 1.0 - args.magicbrush_probability},
-                    {"name": "MagicBrush", "root": str(magicbrush_dataset.root.resolve()), "split": "train",
-                     "sample_count": len(magicbrush_dataset), "probability": args.magicbrush_probability,
-                     "edit_mask_decoding": MAGICBRUSH_MASK_DECODING},
-                ],
-                "validation": {"dataset": "Inter-Edit", "split": "test", "language_filter": args.dataset_language},
-            }
-            (mixture_dir / f"rank_{accelerator.process_index:04d}.json").write_text(
-                json.dumps(mixture_info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
-            )
-            logger.info("Mixing Inter-Edit/MagicBrush with probabilities %.2f/%.2f; MagicBrush rank-local rows=%s",
-                        1.0 - args.magicbrush_probability, args.magicbrush_probability, len(magicbrush_dataset))
+        write_data_mixture_info(args.output_dir, mixture_info)
+        logger.info("Training data on rank %s (before empty-mask exclusions): %s",
+                    accelerator.process_index,
+                    [(source["name"], source["sample_count"], source["probability"])
+                     for source in mixture_info["sources"]])
     elif args.instance_dataset == 'HuggingFaceDataset':
         # Inter-Edit and local parquet readers do not depend on HF datasets.
         from datasets import load_dataset
@@ -1105,6 +1115,7 @@ def main(args):
     logger.info(f"  Num training steps = {args.max_train_steps}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
     logger.info("  Text condition dropout probability = %s", args.cond_dropout_prob)
+    logger.info("  Training mask-to-bbox probability = %s", args.mask_bbox_prob)
     logger.info("  Sparse target halo = %s Transformer cell(s); supervise halo = %s",
                 args.sparse_target_halo, args.supervise_target_halo)
     if args.fresh_start:
@@ -1155,6 +1166,8 @@ def main(args):
     if accelerator.is_main_process:
         with open(os.path.join(args.output_dir, "timestep_sampling_config.json"), "w") as f:
             json.dump(timestep_sampling_config, f, indent=2)
+        with open(os.path.join(args.output_dir, "mask_augmentation_config.json"), "w") as f:
+            json.dump(mask_augmentation_config, f, indent=2)
 
     # This is to solve the inconsistent tensor device issue
     if args.use_ema:
@@ -1267,8 +1280,12 @@ def main(args):
                     token_side = int(math.isqrt(seq_len))
                     if token_side * token_side != seq_len:
                         raise ValueError(f"Expected a square VQ token grid, got {seq_len} tokens")
-                    token_edit_mask = resize_edit_mask_to_tokens(
+                    training_edit_mask, bbox_selected = random_mask_to_bbox(
                         batch["edit_mask"].to(image_tokens.device, non_blocking=True),
+                        args.mask_bbox_prob,
+                    )
+                    token_edit_mask = resize_edit_mask_to_tokens(
+                        training_edit_mask,
                         (token_side, token_side),
                     )
                     token_generation_mask = token_edit_mask
@@ -1411,6 +1428,7 @@ def main(args):
                     mask_prob.mean(),
                     (mask_prob <= args.condition_cache_threshold).float().mean(),
                     condition_dropped.float().mean(),
+                    bbox_selected.float().mean() if args.edit_only_diffusion else mask_prob.new_zeros(()),
                 ))
                 avg_noise_stats = accelerator.gather(noise_stats.unsqueeze(0)).mean(dim=0)
                 avg_masking_rate = avg_noise_stats[0]
@@ -1441,6 +1459,7 @@ def main(args):
                     }
                     if args.edit_only_diffusion:
                         logs.update({
+                            "mask_bbox_fraction": avg_noise_stats[3].item(),
                             "edit_token_ratio": edit_token_ratio.item(),
                             "generation_token_ratio": generation_token_ratio.item(),
                             "halo_supervised_token_count": halo_supervised_count.item(),

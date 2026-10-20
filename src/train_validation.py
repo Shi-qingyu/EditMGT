@@ -75,10 +75,10 @@ def mask_overlay(source, mask, color=(255, 45, 45)):
 
 def prepare_inter_edit_validation_cases(
     data_dir, output_dir, resolution, num_images=5, sample_indices=None, cache_dir=None,
-    language="all",
+    language="all", translations_dir=None,
 ):
     """Read/resize the test cases once; validation steps reuse these PIL images."""
-    reader = InterEditReader(data_dir, "test", cache_dir)
+    reader = InterEditReader(data_dir, "test", cache_dir, translations_dir=translations_dir)
     indices = select_validation_indices(reader.test_rows, num_images, sample_indices, language)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -109,6 +109,9 @@ def prepare_inter_edit_validation_cases(
                 "mask_original_size": list(raw["edit_mask"].size),
                 "input_dir": str(case_dir.relative_to(output_dir)),
             }
+            for field in ("instruction_original", "language_original"):
+                if field in raw:
+                    metadata[field] = raw[field]
             cases.append({**metadata, "source": source, "target": target, "mask": mask, "overlay": overlay})
             manifest.append(metadata)
     (output_dir / "samples.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -118,6 +121,8 @@ def prepare_inter_edit_validation_cases(
         "eligible_samples": sum(matches_inter_edit_language(row, language) for row in reader.test_rows),
         "selected_test_indices": indices,
     }
+    if reader.translations is not None:
+        language_summary.update(translations_dir=str(reader.translations.root), instruction_variant="translated_english")
     (output_dir / "selection.json").write_text(
         json.dumps(language_summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
     )
@@ -168,7 +173,7 @@ def comparison_panel(case, generated, step, seed, generation_overlay=None):
     tile = min(512, case["source"].width)
     header, labels = 28, 24
     images = [case["source"], case["overlay"]]
-    column_labels = ["Source", "Original edit mask (output ROI)"]
+    column_labels = ["Source", "Original edit mask"]
     if generation_overlay is not None:
         images.append(generation_overlay)
         column_labels.append("Generation token mask")
@@ -198,12 +203,12 @@ def _stack_panels(panels):
     return sheet
 
 
-def _write_html_report(output_dir, step_dir, records):
+def _write_html_report(output_dir, step_dir, records, split="test"):
     rows = []
     for record in records:
         input_dir = output_dir / record["input_dir"]
         paths = [input_dir / "source.png", input_dir / "mask_overlay.png"]
-        labels = ["Source", "Original edit mask (output ROI)"]
+        labels = ["Source", "Original edit mask"]
         if record.get("generation_mask_overlay_path"):
             paths.append(step_dir / record["generation_mask_overlay_path"])
             labels.append("Generation token mask")
@@ -223,17 +228,19 @@ def _write_html_report(output_dir, step_dir, records):
     style = "body{font-family:sans-serif;margin:24px} .images{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:12px} figure{margin:0} img{width:100%}"
     (step_dir / "index.html").write_text(
         f'<!doctype html><meta charset="utf-8"><title>{step_dir.name}</title><style>{style}</style>'
-        f'<h1>Inter-Edit test · {step_dir.name}</h1>'
+        f'<h1>Inter-Edit {split} · {step_dir.name}</h1>'
         '<p>Red: original edit mask. Orange: internal token generation region (halo is disabled by default). '
-        'When pixel preservation is enabled, only the red region is composited into the final image.</p>'
+        'By default, the complete token grid is decoded without RGB compositing. '
+        'When pixel preservation is explicitly enabled, only the red region is composited into the final image.</p>'
         + "".join(rows), encoding="utf-8",
     )
     steps = sorted(path for path in output_dir.glob("step_*") if (path / "index.html").is_file())
     links = "".join(f'<li><a href="{path.name}/index.html">{path.name}</a> · '
                     f'<a href="{path.name}/contact_sheet.png">comparison grid</a></li>' for path in steps)
+    title = "Inter-Edit train inference" if split == "train" else "Inter-Edit training validation"
     (output_dir / "index.html").write_text(
-        '<!doctype html><meta charset="utf-8"><title>Inter-Edit training validation</title>'
-        f'<h1>Inter-Edit training validation</h1><ul>{links}</ul>', encoding="utf-8",
+        f'<!doctype html><meta charset="utf-8"><title>{title}</title>'
+        f'<h1>{title}</h1><ul>{links}</ul>', encoding="utf-8",
     )
 
 
@@ -242,12 +249,17 @@ def run_inter_edit_validation(
     pipe, cases, output_dir, step, num_inference_steps=18, guidance_scale=6.0,
     reference_strength=1.0, seed=42, edit_only_diffusion=True, sparse_target=True,
     sparse_target_halo=0, negative_prompt=None, use_ema=False,
-    use_reference_kv_cache=True, reference_kv_cache_threshold=0.3,
+    use_reference_kv_cache=True, reference_kv_cache_threshold=0.8,
     use_condition_kv_cache=None,
     inference_shift=1.0,
-    preserve_unmasked_pixels=True,
+    preserve_unmasked_pixels=False,
+    split="test",
+    condition_kv_cache_reuse_steps=None,
+    allow_early_condition_cache=False,
 ):
     """Generate one case at a time to keep validation memory bounded."""
+    if split not in ("train", "test"):
+        raise ValueError("Inter-Edit report split must be 'train' or 'test'")
     if not cases:
         raise ValueError("Inter-Edit validation needs at least one case")
     if sparse_target_halo is None:
@@ -275,6 +287,8 @@ def run_inter_edit_validation(
             use_condition_kv_cache=use_condition_kv_cache,
             inference_shift=inference_shift,
             preserve_unmasked_pixels=preserve_unmasked_pixels,
+            condition_kv_cache_reuse_steps=condition_kv_cache_reuse_steps,
+            allow_early_condition_cache=allow_early_condition_cache,
         ).images[0].convert("RGB")
         case_dir = step_dir / f"sample_{case['sample_id']:05d}"
         case_dir.mkdir(parents=True, exist_ok=True)
@@ -310,7 +324,7 @@ def run_inter_edit_validation(
     elapsed = time.perf_counter() - started
     model_config = getattr(getattr(pipe, "transformer", None), "config", None)
     metadata = {
-        "step": step, "split": "test", "use_ema": use_ema, "seconds": elapsed,
+        "step": step, "split": split, "use_ema": use_ema, "seconds": elapsed,
         "language_filter": cases[0].get("language_filter", "all"),
         "num_inference_steps": num_inference_steps, "guidance_scale": guidance_scale,
         "reference_strength": reference_strength, "negative_prompt": negative_prompt,
@@ -318,9 +332,14 @@ def run_inter_edit_validation(
         "sparse_target_halo": sparse_target_halo, "cases": records,
         "supervise_target_halo": getattr(model_config, "supervise_target_halo", False),
         "preserve_unmasked_pixels": bool(preserve_unmasked_pixels and (edit_only_diffusion or sparse_target)),
+        "output_compositing": (
+            "original_pixel_mask" if preserve_unmasked_pixels and (edit_only_diffusion or sparse_target) else "none"
+        ),
         "use_reference_kv_cache": use_reference_kv_cache,
         "reference_kv_cache_threshold": reference_kv_cache_threshold,
         "use_condition_kv_cache": use_condition_kv_cache,
+        "condition_kv_cache_reuse_steps": condition_kv_cache_reuse_steps,
+        "allow_early_condition_cache": allow_early_condition_cache,
         "cache_conditioning": getattr(model_config, "cache_conditioning", False),
         "condition_cache_threshold": getattr(model_config, "condition_cache_threshold", None),
         "time_conditioning": getattr(model_config, "time_conditioning", "legacy"),
@@ -329,6 +348,6 @@ def run_inter_edit_validation(
         "inference_schedule": getattr(pipe, "last_inference_schedule_info", None),
     }
     (step_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    _write_html_report(output_dir, step_dir, records)
+    _write_html_report(output_dir, step_dir, records, split=split)
     return {"step_dir": step_dir, "panels": panels, "captions": captions,
             "contact_sheet": contact_sheet, "seconds": elapsed}

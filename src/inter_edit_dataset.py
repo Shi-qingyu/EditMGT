@@ -18,6 +18,7 @@ from PIL import Image
 from torch.utils.data import IterableDataset, get_worker_info
 
 from src.dataset_utils import process_edit_sample, tokenize_prompt
+from src.inter_edit_translations import InterEditTranslations
 
 
 DEFAULT_INTER_EDIT_ROOT = "/mnt/geminihzceph/public/data/Inter-Edit"
@@ -147,7 +148,7 @@ class TarAssetReader:
 class InterEditReader:
     """Expose official metadata and source/target/mask PIL images for both splits."""
 
-    def __init__(self, root_dir=DEFAULT_INTER_EDIT_ROOT, split="train", cache_dir=None):
+    def __init__(self, root_dir=DEFAULT_INTER_EDIT_ROOT, split="train", cache_dir=None, translations_dir=None):
         if split not in ("train", "test"):
             raise ValueError("Inter-Edit split must be 'train' or 'test'")
         root = Path(root_dir)
@@ -155,6 +156,7 @@ class InterEditReader:
         self.split = split
         self.cache_dir = cache_dir
         self.test_rows = None
+        self.translations = None
         if split == "train":
             with (self.root / "manifest.json").open() as handle:
                 manifest = json.load(handle)
@@ -163,17 +165,33 @@ class InterEditReader:
             self.metadata_files = sorted((self.root / "metadata").glob("train-*.jsonl.gz"))
             if len(self.metadata_files) != int(manifest["num_sample_shards"]):
                 raise ValueError(f"Incomplete Inter-Edit training metadata under {self.root}")
+            if translations_dir is not None:
+                self.translations = InterEditTranslations(translations_dir, self.root, self.metadata_files)
         else:
-            with (self.root / "metadata.json").open(encoding="utf-8") as handle:
-                self.test_rows = json.load(handle)
+            path = self.root / "metadata.json"
+            if path.is_file():
+                with path.open(encoding="utf-8") as handle:
+                    self.test_rows = json.load(handle)
+                indexed_rows = list(enumerate(self.test_rows))
+            else:
+                path = self.root / "metadata.jsonl"
+                with path.open(encoding="utf-8") as handle:
+                    indexed_rows = [(index, json.loads(line)) for index, line in enumerate(handle) if line.strip()]
+                self.test_rows = [row for _, row in indexed_rows]
             self.num_samples = len(self.test_rows)
-            self.metadata_files = [self.root / "metadata.json"]
+            self.metadata_files = [path]
+            if translations_dir is not None:
+                self.translations = InterEditTranslations(translations_dir, self.root, self.metadata_files, split="test")
+                self.test_rows = self.translations.apply(path, indexed_rows)
 
     def read_metadata(self, path):
         if self.split == "test":
             return self.test_rows
         with gzip.open(path, "rt", encoding="utf-8") as handle:
-            return [json.loads(line) for line in handle if line.strip()]
+            indexed_rows = [(index, json.loads(line)) for index, line in enumerate(handle) if line.strip()]
+        if self.translations is not None:
+            return self.translations.apply(path, indexed_rows)
+        return [row for _, row in indexed_rows]
 
     def count_metadata_languages(self, path):
         """Cache per-shard counts so filtered __len__ needs no image reads.
@@ -184,6 +202,8 @@ class InterEditReader:
         path = Path(path)
         stat = path.stat()
         identity = f"prompt-language-v1:{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
+        if self.translations is not None:
+            identity += ":" + self.translations.cache_identity(path)
         digest = hashlib.sha256(identity.encode()).hexdigest()[:24]
         cache_root = (Path(self.cache_dir) if self.cache_dir is not None
                       else DEFAULT_INTER_EDIT_CACHE) / "language_counts"
@@ -259,14 +279,14 @@ class InterEditDataset(IterableDataset):
         self, root_dir=DEFAULT_INTER_EDIT_ROOT, split="train", tokenizer=None,
         size=1024, text_encoder_architecture="CLIP", norm=False,
         rank=0, world_size=1, shuffle=True, repeat=True, cache_dir=None, seed=42,
-        language="all",
+        language="all", translations_dir=None,
     ):
         super().__init__()
         if world_size < 1 or not 0 <= rank < world_size:
             raise ValueError("Inter-Edit rank must be in [0,world_size)")
         if language not in INTER_EDIT_LANGUAGES:
             raise ValueError(f"Unsupported Inter-Edit language filter: {language!r}")
-        self.reader = InterEditReader(root_dir, split, cache_dir)
+        self.reader = InterEditReader(root_dir, split, cache_dir, translations_dir=translations_dir)
         self.language = language
         self.tokenizer, self.size = tokenizer, size
         self.text_encoder_architecture, self.norm = text_encoder_architecture, norm

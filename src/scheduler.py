@@ -107,9 +107,10 @@ class Scheduler(SchedulerMixin, ConfigMixin):
         self._mask_ratios_tensor = torch.cos(progress * math.pi / 2)
         self._mask_ratios_tensor[0] = 1.0
         self._mask_ratios_tensor[-1] = 0.0
-        # Legacy weights keep their step-ID time units; normalized weights use
-        # the same cosine mask_ratios directly inside the Transformer.
-        self.conditioning_timesteps = tuple(range(num_inference_steps - 1, -1, -1))
+        # Legacy training passes r*1000 before the Transformer's own x1000.
+        # Match those units using the noise level BEFORE each forward; step IDs
+        # remain scheduler-only. Normalized weights use mask_ratios directly.
+        self.conditioning_timesteps = tuple(ratio * 1000 for ratio in self.mask_ratios[:-1])
 
         if isinstance(temperature, (tuple, list)):
             self.temperatures = torch.linspace(temperature[0], temperature[1], num_inference_steps, device=device)

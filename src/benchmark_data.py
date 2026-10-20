@@ -1,7 +1,7 @@
 """Benchmark-only image access and MagicBrush session metadata.
 
-No training crops, repetition, language heuristics or empty-mask exclusions are
-applied here. Missing/invalid examples remain visible in evaluation counts.
+No training crops, repetition or language heuristics are applied here.
+Benchmark-specific missing/empty-mask skips are recorded by the shared runner.
 """
 import io
 import json
@@ -81,6 +81,11 @@ class BenchmarkImages:
         if spec["kind"] == "file":
             with Image.open(spec["path"]) as image:
                 return self._convert_image(image, mode)
+        if spec["kind"] == "pie_rle":
+            from src.pie_bench_data import decode_pie_mask
+
+            image = decode_pie_mask(spec["runs"], spec["shape"], spec.get("fix_boundary", True))
+            return self._convert_image(image, mode)
         if spec["kind"] != "parquet":
             raise ValueError(f"Unknown image specification: {spec['kind']}")
         value = self._parquet_row(spec["file"], spec["row"], spec["column"])[spec["column"]]

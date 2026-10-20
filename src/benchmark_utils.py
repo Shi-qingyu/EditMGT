@@ -79,19 +79,24 @@ def add_benchmark_arguments(parser, benchmark, native_editmgt=False):
     parser.add_argument("--negative-prompt", default="",
                         help="Negative text for both vanilla and sparse models; empty avoids suppressing text/logo tasks.")
     parser.add_argument("--reference-strength", type=float, default=1.0)
-    parser.add_argument("--reference-kv-cache-threshold", type=float, default=0.3)
+    parser.add_argument("--reference-kv-cache-threshold", type=float, default=0.8)
+    parser.add_argument("--condition-cache-threshold", type=float, default=0.8,
+                        help="Runtime text/reference prefix phase; overrides the checkpoint's saved threshold.")
+    parser.add_argument("--cache-first-step", action="store_true",
+                        help="Ablation: capture text/reference KV at the first forward, then reuse it for "
+                             "all remaining forwards. Overrides capture timing, retaining the configured prefix phase.")
     parser.add_argument("--disable-reference-kv-cache", action="store_true")
     parser.add_argument("--disable-condition-kv-cache", action="store_true")
     parser.add_argument("--sparse-target-halo", type=int, default=0,
                         help="Transformer-cell halo; default 0 disables dilation, matching training.")
-    parser.add_argument("--preserve-unmasked-pixels", action=argparse.BooleanOptionalAction, default=True,
-                        help="Composite only the original mask onto source RGB, including at native output resolution.")
+    parser.add_argument("--preserve-unmasked-pixels", action=argparse.BooleanOptionalAction, default=False,
+                        help="Opt into source-RGB compositing at generation and native export resolutions; default preserves only source tokens.")
     parser.add_argument("--mask-mode", choices=["provided", "none"], default="provided")
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--warmup", type=int, default=1, help="Unmeasured warmup generations before each generation process.")
-    parser.add_argument("--limit", type=int, default=None, help="Optional first N samples (Inter-Edit) or WHOLE sessions (MagicBrush).")
-    parser.add_argument("--save-inputs", action="store_true", help="Also save source, GT and original mask; uses additional disk space.")
+    parser.add_argument("--limit", type=int, default=None, help="Optional first N samples (Inter-Edit/PIE-Bench) or WHOLE sessions (MagicBrush).")
+    parser.add_argument("--save-inputs", action="store_true", help="Also save source, original mask and GT when available; uses additional disk space.")
     parser.add_argument("--metrics", default=",".join(DEFAULT_METRICS[benchmark]))
     parser.add_argument("--metric-resolution", type=int, default=None, help="Optional square scoring size; default follows native benchmark sizes.")
     parser.add_argument("--model-cache-dir", type=Path, default=None)
@@ -134,6 +139,12 @@ def validate_arguments(parser, args):
         parser.error("--sparse-target-halo must be nonnegative")
     if not 0 <= args.reference_kv_cache_threshold <= 1:
         parser.error("Cache threshold must be in [0,1]")
+    if not 0 < args.condition_cache_threshold <= 1:
+        parser.error("--condition-cache-threshold must be in (0,1]")
+    if args.cache_first_step and (args.vanilla or args.num_inference_steps < 2
+                                 or args.disable_reference_kv_cache or args.disable_condition_kv_cache):
+        parser.error("--cache-first-step requires a trained cache-conditioned checkpoint, at least two "
+                     "inference steps and enabled condition/reference caching")
     if args.metric_resolution is not None and args.metric_resolution < 1:
         parser.error("--metric-resolution must be positive")
     if not all(math.isfinite(value) for value in (args.guidance_scale, args.reference_strength)):
@@ -146,6 +157,15 @@ def generation_config(args, benchmark=None):
             "disable_reference_kv_cache", "disable_condition_kv_cache", "sparse_target_halo",
             "mask_mode", "preserve_unmasked_pixels", "bf16", "seed", "warmup", "save_inputs")
     config = {key: getattr(args, key) for key in keys}
+    if not args.native_editmgt:
+        # Include the runtime phase so --resume cannot mix the historical
+        # checkpoint phase with the new inference policy.
+        config["condition_cache_threshold"] = args.condition_cache_threshold
+    if args.cache_first_step:
+        # Only add this policy when selected, preserving resume compatibility
+        # for existing runs that use the normal threshold-based schedule.
+        config.update(cache_first_step=True, condition_kv_cache_reuse_steps=args.num_inference_steps - 1,
+                      allow_early_condition_cache=True)
     config["checkpoint"] = str(args.checkpoint.resolve()) if args.checkpoint else None
     if args.checkpoint:
         root = args.checkpoint.resolve()
@@ -225,6 +245,53 @@ class BenchmarkRun:
         return self.root / task["prediction"]
 
 
+class SkippedBenchmarkSample(ValueError):
+    """A known invalid benchmark annotation that should not abort a worker."""
+
+    def __init__(self, reason, message):
+        super().__init__(message)
+        self.reason = reason
+
+
+def inter_edit_benchmark_mask(args, run, resolver, task):
+    """Check Inter-Edit mask eligibility before model loading or scoring."""
+    spec = task.get("mask")
+    if (not spec or (spec.get("kind") == "tar" and not spec.get("member"))
+            or (spec.get("kind") == "file" and not spec.get("path"))):
+        raise SkippedBenchmarkSample("missing_mask", "No mask annotation")
+    try:
+        mask = resolver.edit_mask(spec, "inter_edit")
+    except (FileNotFoundError, KeyError) as error:
+        raise SkippedBenchmarkSample("missing_mask", str(error)) from error
+    if mask.getbbox() is None:
+        raise SkippedBenchmarkSample("empty_mask", "Annotation mask has no editable pixels")
+    generation = run.info["settings"]["generation"]
+    if generation.get("mask_mode", args.mask_mode) == "provided":
+        resolution = generation.get("resolution", args.resolution)
+        if resize_binary_edit_mask(mask, (resolution, resolution)).getbbox() is None:
+            raise SkippedBenchmarkSample("empty_mask_after_resize", "Mask has no editable pixels at generation resolution")
+    return mask
+
+
+def record_skipped_benchmark_sample(run, task, error, stage):
+    record = {"status": "skipped", "key": task["key"], "reason": error.reason,
+              "error": str(error), "stage": stage}
+    for field in ("test_index", "edit_type", "language"):
+        if field in task:
+            record[field] = task[field]
+    atomic_json(run.record_path(task["key"]), record)
+    print(f"Skipping {task['key']}: {error.reason}: {error}", flush=True)
+
+
+def skipped_benchmark_samples(run):
+    skipped = []
+    for task in run.selection:
+        record = run.record(task["key"])
+        if record and record.get("status") == "skipped":
+            skipped.append(record)
+    return skipped
+
+
 class InferenceRunner:
     def __init__(self, args):
         from src.editmgt import init_edit_mgt
@@ -240,9 +307,14 @@ class InferenceRunner:
             elif not (checkpoint / "lora_config.json").is_file():
                 raise FileNotFoundError(f"No full Transformer or LoRA checkpoint at {checkpoint}")
         self.pipe = init_edit_mgt(args.device, enable_bf16=args.bf16, base_model_path=args.model_path,
-                                  transformer_path=str(transformer_path) if transformer_path else None)
+                                  transformer_path=str(transformer_path) if transformer_path else None,
+                                  condition_cache_threshold=args.condition_cache_threshold)
         if checkpoint and transformer_path is None:
             load_lora_adapter(self.pipe.transformer, str(checkpoint))
+            # LoRA loading restores its saved phase after base initialization.
+            from src.editmgt import set_inference_cache_threshold
+
+            set_inference_cache_threshold(self.pipe.transformer, args.condition_cache_threshold)
         if args.native_editmgt:
             config = self.pipe.transformer.config
             if (config.sparse_target or config.token_type_rope or config.cache_conditioning
@@ -264,6 +336,10 @@ class InferenceRunner:
             "dtype": "bfloat16" if args.bf16 else "float32",
             "time_conditioning": self.pipe.transformer.config.time_conditioning,
             "cache_conditioning": self.pipe.transformer.config.cache_conditioning,
+            "condition_cache_threshold": self.pipe.transformer.config.condition_cache_threshold,
+            "checkpoint_condition_cache_threshold": getattr(
+                self.pipe.transformer, "_loaded_condition_cache_threshold", None,
+            ),
             "supervise_target_halo": self.pipe.transformer.config.supervise_target_halo,
             "warmup_generations_per_process": args.warmup,
         }
@@ -300,6 +376,8 @@ class InferenceRunner:
                 use_reference_kv_cache=not args.disable_reference_kv_cache,
                 use_condition_kv_cache=False if args.disable_condition_kv_cache else None,
                 reference_kv_cache_threshold=args.reference_kv_cache_threshold,
+                condition_kv_cache_reuse_steps=args.num_inference_steps - 1 if args.cache_first_step else None,
+                allow_early_condition_cache=args.cache_first_step,
                 lora_part_enable=not args.native_editmgt,
             ).images[0].convert("RGB")
 
@@ -364,11 +442,18 @@ def generate_benchmark(args, run, resolver, *, output_dir=None, progress_desc="G
         for task in tqdm(run.selection, desc=progress_desc):
             parent = task.get("input_prediction_key")
             previous = run.record(task["key"])
-            if (previous and previous["status"] == "ok" and run.image_path(task).is_file()
-                    and parent not in regenerated):
-                continue
-            regenerated.add(task["key"])
             try:
+                # Validate mask-conditioned Inter-Edit cases even on resume,
+                # before a missing/empty mask can reach model initialization.
+                # Native mask-free generation still does not read annotations;
+                # its invalid cases are excluded when regional scoring starts.
+                checked_mask = None
+                if run.info["benchmark"] == "inter_edit" and args.mask_mode == "provided":
+                    checked_mask = inter_edit_benchmark_mask(args, run, resolver, task)
+                if (previous and previous["status"] == "ok" and run.image_path(task).is_file()
+                        and parent not in regenerated):
+                    continue
+                regenerated.add(task["key"])
                 if parent:
                     upstream = run.record(parent)
                     if not upstream or upstream["status"] != "ok":
@@ -380,8 +465,10 @@ def generate_benchmark(args, run, resolver, *, output_dir=None, progress_desc="G
                 # Annotation masks are not loaded during mask-free generation.
                 # Inter-Edit scoring reads its original masks in the metrics
                 # stage; they never become inputs to native EditMGT.
-                mask = (resolver.edit_mask(task["mask"], run.info["benchmark"])
-                        if args.mask_mode == "provided" and task.get("mask") else None)
+                mask = checked_mask
+                if run.info["benchmark"] != "inter_edit":
+                    mask = (resolver.edit_mask(task["mask"], run.info["benchmark"])
+                            if args.mask_mode == "provided" and task.get("mask") else None)
                 if runner is None:
                     runner = InferenceRunner(args)
                     atomic_json(output_dir / "execution.json", runner.metadata)
@@ -392,10 +479,13 @@ def generate_benchmark(args, run, resolver, *, output_dir=None, progress_desc="G
                 if args.save_inputs:
                     directory = run.root / "inputs" / safe_name(task["key"])
                     save_png(directory / "source.png", source)
-                    save_png(directory / "target.png", resolver.image(task["target"], "RGB"))
+                    if task.get("target") is not None:
+                        save_png(directory / "target.png", resolver.image(task["target"], "RGB"))
                     if mask is not None:
                         save_png(directory / "mask.png", normalize_edit_mask_image(mask))
                 atomic_json(run.record_path(task["key"]), {"status": "ok", "key": task["key"], **info})
+            except SkippedBenchmarkSample as error:
+                record_skipped_benchmark_sample(run, task, error, "generate")
             except Exception as error:
                 atomic_json(run.record_path(task["key"]), {"status": "error", "key": task["key"],
                                                           "error_type": type(error).__name__, "error": str(error)})
@@ -409,13 +499,21 @@ def generate_benchmark(args, run, resolver, *, output_dir=None, progress_desc="G
 
 def write_generation_summary(run, output_dir=None):
     completed = []
+    skipped = []
     for task in run.selection:
         record = run.record(task["key"])
         if record and record["status"] == "ok" and run.image_path(task).is_file():
             completed.append(record)
+        elif record and record.get("status") == "skipped":
+            skipped.append(record)
+    expected = len(run.selection) - len(skipped)
     summary = {
-        "expected": len(run.selection), "completed": len(completed),
-        "complete": len(completed) == len(run.selection), "timing": timing_summary(completed),
+        "selected": len(run.selection), "expected": expected, "completed": len(completed),
+        "skipped": len(skipped), "skipped_samples": skipped,
+        "skipped_by_reason": {reason: sum(record["reason"] == reason for record in skipped)
+                              for reason in sorted({record["reason"] for record in skipped})},
+        "complete": expected > 0 and len(completed) == expected,
+        "full_selection_generated": len(completed) == len(run.selection), "timing": timing_summary(completed),
     }
     atomic_json(Path(output_dir or run.root) / "generation_summary.json", summary)
     return summary
@@ -440,9 +538,20 @@ def validate_metric_inputs(args, benchmark, selection):
         return names
     required = {"lpips": "lpips", "alpha-in": "alpha_clip", "alpha-out": "alpha_clip",
                 "clip-i": "clip", "clip-t": "clip", "boundary": "cv2"}
+    if benchmark == "pie_bench":
+        for name in names:
+            if name.startswith("lpips"):
+                required[name] = "lpips"
+            elif name.startswith("ssim"):
+                required[name] = "torchmetrics"
+            elif name.startswith("clip_"):
+                required[name] = "transformers"
     for package in {required[name] for name in names if name in required}:
         if importlib.util.find_spec(package) is None:
-            raise ImportError(f"Metric dependency {package!r} is missing; see requirements-benchmark.txt / README")
+            raise ImportError(
+                f"Metric dependency {package!r} is missing from the benchmark environment. "
+                "Install metric dependencies into .venv with: bash scripts/setup_benchmark_env.sh"
+            )
     if {"alpha-in", "alpha-out"} & set(names):
         if args.alpha_clip_ckpt is None or not args.alpha_clip_ckpt.is_file():
             raise FileNotFoundError("Provide --alpha-clip-ckpt, or explicitly select metrics without AlphaCLIP")
@@ -474,14 +583,24 @@ def score_benchmark(args, run, resolver, names, *, output_dir=None, model_lock=N
 
             lock = stack.enter_context(Path(model_lock).open("a"))
             fcntl.flock(lock, fcntl.LOCK_EX)
-        suite = BenchmarkMetrics(
-            run.info["benchmark"], names, device=args.metric_device or args.device,
-            alpha_clip_ckpt=args.alpha_clip_ckpt, alpha_clip_model=args.alpha_clip_model,
-            model_cache_dir=args.model_cache_dir, dino_repo=args.dino_repo, dino_weights=args.dino_weights,
-            metric_resolution=args.metric_resolution,
-        )
+        if run.info["benchmark"] == "pie_bench":
+            from src.pie_bench_metrics import PIEBenchMetrics
+
+            suite = PIEBenchMetrics(
+                names, device=args.metric_device or args.device, model_cache_dir=args.model_cache_dir,
+                dino_repo=args.dino_repo, dino_weights=args.dino_weights, metric_resolution=args.metric_resolution,
+            )
+        else:
+            suite = BenchmarkMetrics(
+                run.info["benchmark"], names, device=args.metric_device or args.device,
+                alpha_clip_ckpt=args.alpha_clip_ckpt, alpha_clip_model=args.alpha_clip_model,
+                model_cache_dir=args.model_cache_dir, dino_repo=args.dino_repo, dino_weights=args.dino_weights,
+                metric_resolution=args.metric_resolution,
+            )
     if getattr(args, "caption_file", None):
         suite.protocol["caption_file"] = file_identity(args.caption_file)
+    if run.info["benchmark"] == "inter_edit":
+        suite.protocol["invalid_mask_policy"] = "skip missing/empty masks; preserve original selection and report exclusions"
     metrics_dir = Path(output_dir) if output_dir is not None else run.root / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
     atomic_json(metrics_dir / "protocol.json", suite.protocol)
@@ -491,21 +610,34 @@ def score_benchmark(args, run, resolver, names, *, output_dir=None, model_lock=N
         for task in tqdm(run.selection, desc=progress_desc):
             try:
                 record = run.record(task["key"])
+                if record and record.get("status") == "skipped":
+                    continue
+                checked_mask = (inter_edit_benchmark_mask(args, run, resolver, task)
+                                if run.info["benchmark"] == "inter_edit" else None)
                 if not record or record["status"] != "ok":
                     raise ValueError(f"No completed generation record: {record.get('error') if record else 'missing record'}")
                 with Image.open(run.image_path(task)) as image:
                     prediction = image.convert("RGB")
-                scores = suite.score(
-                    prediction, resolver.image(task["target"], "RGB"),
-                    source=resolver.image(task["source"], "RGB") if run.info["benchmark"] == "inter_edit" else None,
-                    mask=resolver.image(task["mask"], "L") if run.info["benchmark"] == "inter_edit" else None,
-                    caption=task.get("caption"),
-                )
+                if run.info["benchmark"] == "pie_bench":
+                    scores = suite.score(
+                        prediction, source=resolver.image(task["source"], "RGB"),
+                        mask=resolver.edit_mask(task["mask"], "pie_bench"),
+                        source_caption=task["source_caption"], target_caption=task["caption"],
+                    )
+                else:
+                    scores = suite.score(
+                        prediction, resolver.image(task["target"], "RGB"),
+                        source=resolver.image(task["source"], "RGB") if run.info["benchmark"] == "inter_edit" else None,
+                        mask=checked_mask,
+                        caption=task.get("caption"),
+                    )
                 row = {**task, "metrics": scores, "seed": record["seed"], "inference_seconds": record["inference_seconds"]}
                 rows.append(row)
                 records.append(record)
                 scores_file.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
                 scores_file.flush()
+            except SkippedBenchmarkSample as error:
+                record_skipped_benchmark_sample(run, task, error, "metrics")
             except Exception as error:
                 failure = {"key": task["key"], "error_type": type(error).__name__, "error": str(error)}
                 failures.append(failure)
@@ -522,14 +654,31 @@ def score_benchmark(args, run, resolver, names, *, output_dir=None, model_lock=N
 
 def build_metric_summary(run, rows, failures, records, protocol):
     """Aggregate per-image scores, including shards with unequal sample counts."""
+    skipped = skipped_benchmark_samples(run)
+    expected = len(run.selection) - len(skipped)
     summary = {
         "benchmark": run.info["benchmark"], "dataset": run.info["settings"]["dataset"],
         "generation": run.info["settings"]["generation"], "metric_protocol": protocol,
-        "expected_predictions": len(run.selection), "scored_predictions": len(rows),
-        "failed_predictions": len(failures), "unprocessed_predictions": len(run.selection) - len(rows) - len(failures),
-        "complete": len(rows) == len(run.selection), "timing": timing_summary(records),
+        "selected_predictions": len(run.selection), "expected_predictions": expected, "scored_predictions": len(rows),
+        "skipped_predictions": len(skipped), "skipped_samples": skipped,
+        "skipped_by_reason": {reason: sum(record["reason"] == reason for record in skipped)
+                              for reason in sorted({record["reason"] for record in skipped})},
+        "failed_predictions": len(failures), "unprocessed_predictions": expected - len(rows) - len(failures),
+        "complete": expected > 0 and len(rows) == expected,
+        "full_selection_scored": len(rows) == len(run.selection), "timing": timing_summary(records),
     }
-    if run.info["benchmark"] == "inter_edit":
+    if run.info["benchmark"] == "pie_bench":
+        from src.pie_bench_metrics import pie_metric_summary
+
+        summary["overall"] = pie_metric_summary(rows)
+        groups = sorted({task["edit_type"] for task in run.selection})
+        summary["by_edit_type"] = {
+            group: {"expected": sum(task["edit_type"] == group for task in run.selection),
+                    "scored": sum(row["edit_type"] == group for row in rows),
+                    "metrics": pie_metric_summary([row for row in rows if row["edit_type"] == group])}
+            for group in groups
+        }
+    elif run.info["benchmark"] == "inter_edit":
         summary["overall"] = metric_summary(rows)
         for field in ("edit_type", "language"):
             groups = sorted({row.get(field, "unknown") for row in rows})

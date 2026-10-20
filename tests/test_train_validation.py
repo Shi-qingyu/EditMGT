@@ -76,11 +76,27 @@ def test_validation_inputs_are_cached_with_same_geometry_and_original_metadata(v
             assert (output / case["input_dir"] / f"{name}.png").is_file()
 
 
+def test_validation_can_explicitly_include_translated_chinese_test_cases(validation_data, tmp_path):
+    from test_inter_edit_dataset import write_official_test_translations
+
+    root, output, cache, original = validation_data
+    directory = write_official_test_translations(root, tmp_path / "translated-test")
+    cases = prepare_inter_edit_validation_cases(root, output, 16, cache_dir=cache,
+                                                language="en", translations_dir=directory)
+    assert [case["sample_id"] for case in cases] == [0, 1, 3, 4, 5]
+    assert all(case["instruction"].startswith("Add translated object ") for case in cases)
+    assert cases[0]["instruction_original"] == original[0]["instruction"]
+    selection = json.loads((output / "selection.json").read_text())
+    assert selection["eligible_samples"] == len(original)
+    assert selection["instruction_variant"] == "translated_english"
+
+
 class FakePipeline:
     _execution_device = torch.device("cpu")
 
     def __init__(self):
         self.calls = []
+        self.scheduler = SimpleNamespace(config=SimpleNamespace(masking_schedule="cosine"), inference_shift=1.0)
 
     def set_progress_bar_config(self, **kwargs):
         pass
@@ -106,10 +122,12 @@ def test_validation_reports_use_fixed_seeds_sparse_flags_and_no_target_condition
         assert (output / "step_000200" / name / "comparison.png").is_file()
     for call in pipe.calls:
         assert call["sparse_target"] and call["edit_only_diffusion"]
-        assert call["lora_part_enable"] and call["sparse_target_halo"] == 1
+        assert call["lora_part_enable"] and call["sparse_target_halo"] == 0
+        assert not call["preserve_unmasked_pixels"]
         assert "target" not in call and "output" not in call
     metadata = json.loads((report["step_dir"] / "metadata.json").read_text())
     assert metadata["split"] == "test"
+    assert not metadata["preserve_unmasked_pixels"] and metadata["output_compositing"] == "none"
     assert [case["seed"] for case in metadata["cases"]] == [100, 101]
     assert "step_000000" in (output / "index.html").read_text()
     page = (report["step_dir"] / "index.html").read_text()
@@ -204,6 +222,9 @@ def test_visualization_runs_real_sparse_pipeline_and_decodes_images(validation_d
         class EmbeddedPipeline:
             _execution_device = torch.device("cpu")
 
+            def __getattr__(self, name):
+                return getattr(pipe, name)
+
             def set_progress_bar_config(self, **kwargs):
                 pipe.set_progress_bar_config(**kwargs)
 
@@ -218,5 +239,8 @@ def test_visualization_runs_real_sparse_pipeline_and_decodes_images(validation_d
         assert model.training
         with Image.open(report["step_dir"] / "sample_00000" / "generated.png") as generated:
             assert generated.size == (16, 16) and generated.mode == "RGB"
+        metadata = json.loads((report["step_dir"] / "metadata.json").read_text())
+        assert not metadata["preserve_unmasked_pixels"] and metadata["output_compositing"] == "none"
+        assert metadata["cases"][0]["edit_region"]["output_compositing"] == "none"
     finally:
         torch.set_num_threads(previous_threads)

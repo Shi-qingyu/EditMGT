@@ -489,7 +489,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         sparse_target_halo: int = 0,
         token_type_rope: bool = False,
         cache_conditioning: bool = False,
-        condition_cache_threshold: float = 0.3,
+        condition_cache_threshold: float = 0.8,
         time_conditioning: str = "legacy",
         supervise_target_halo: bool = False,
     ):
@@ -617,7 +617,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
             supervise_target_halo=(self.config.supervise_target_halo if supervise_halo is None else supervise_halo),
         )
 
-    def enable_condition_cache_training(self, threshold: float = 0.3):
+    def enable_condition_cache_training(self, threshold: float = 0.8):
         """Enable low-noise prefix isolation and fixed text/reference modulation."""
         if not 0.0 < threshold <= 1.0:
             raise ValueError("condition_cache_threshold must be in (0,1]")
@@ -873,7 +873,8 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                 # Pipeline schedules are host scalars: no scalar transfer or
                 # GPU synchronization is needed on cache-only/high-noise steps.
                 low_noise = mask_ratio <= self.config.condition_cache_threshold
-                if condition_kv_cache is not None and not low_noise:
+                if (condition_kv_cache is not None and not low_noise
+                        and not getattr(condition_kv_cache, "allow_early_capture", False)):
                     raise ValueError("Condition K/V may only be captured/reused in the trained low-noise phase")
                 if low_noise and not cached_condition:
                     condition_prefix_mask = torch.ones(hidden_states.shape[0], device=hidden_states.device,
@@ -885,7 +886,9 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
                 if ratios.numel() != hidden_states.shape[0]:
                     raise ValueError("mask_ratio must be scalar or contain one value per batch sample")
                 condition_prefix_mask = ratios <= self.config.condition_cache_threshold
-                if condition_kv_cache is not None and not bool(condition_prefix_mask.all()):
+                if (condition_kv_cache is not None
+                        and not getattr(condition_kv_cache, "allow_early_capture", False)
+                        and not bool(condition_prefix_mask.all())):
                     raise ValueError("Condition K/V may only be captured/reused in the trained low-noise phase")
         if self.config.time_conditioning == "mask_ratio":
             if mask_ratio is None:

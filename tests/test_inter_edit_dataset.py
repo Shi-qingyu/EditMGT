@@ -166,3 +166,177 @@ def test_tar_index_supports_pax_long_names_and_payload_offsets(tmp_path):
     with TarAssetReader(tmp_path, tmp_path / "cache") as reader:
         assert reader.image("archive.tar", long_name).getpixel((0, 0)) == (1, 2, 3)
         assert reader.image("archive.tar", "masks/next.png").getpixel((2, 2)) == 255
+
+
+def write_test_translations(root, directory):
+    """Create the translation script's actual sidecar format for a small release."""
+    from src.inter_edit_translations import HAN
+    reader = InterEditReader(root)
+    (directory / "shards").mkdir(parents=True)
+    count, inputs = 0, []
+    for path in reader.metadata_files:
+        stat = path.stat()
+        inputs.append({"name": path.name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+        records = []
+        for index, row in enumerate(reader.read_metadata(path)):
+            if HAN.search(row["instruction"]):
+                records.append({"metadata_file": path.name, "row_index": index, "sample_id": row["sample_id"],
+                                "instruction_zh": row["instruction"], "instruction_en": f"Add object {row['sample_id']}."})
+        count += len(records)
+        (directory / "shards" / path.name.removesuffix(".gz")).write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records), encoding="utf-8")
+    (directory / "run_config.json").write_text(json.dumps({"source_train_dir": str(reader.root.resolve()),
+                                                         "inputs": inputs, "limit": None, "model": "Qwen/Qwen3.5-9B"}))
+    (directory / "summary.json").write_text(json.dumps({"selected": count, "translated": count, "pending": 0, "complete": True}))
+    return directory
+
+
+def test_translations_enter_english_training_before_filtering_and_tokenization(inter_edit, tmp_path):
+    root, cache = inter_edit
+    original = InterEditReader(root, cache_dir=cache)
+    path = original.metadata_files[0]
+    assert original.count_metadata_languages(path).get("en", 0) == 0
+    directory = write_test_translations(root, tmp_path / "translated")
+    # English instructions may still contain Chinese text that must be rendered.
+    shard = directory / "shards" / path.name.removesuffix(".gz")
+    records = [json.loads(line) for line in shard.read_text().splitlines()]
+    records[0]["instruction_en"] = 'Add the text "你好" to the sign.'
+    shard.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records), encoding="utf-8")
+    tokenized = []
+
+    class Tokenizer:
+        def __call__(self, instruction, **kwargs):
+            tokenized.append(instruction)
+            class Tokens:
+                input_ids = torch.ones(1, 77, dtype=torch.long)
+            return Tokens()
+
+    dataset = InterEditDataset(root, cache_dir=cache, translations_dir=directory, language="en",
+                              tokenizer=Tokenizer(), shuffle=False, repeat=False, size=8)
+    assert len(dataset) == 8
+    assert dataset.reader.count_metadata_languages(path)["en"] == 2
+    samples = list(dataset)
+    assert len(samples) == 8 and tokenized == [row["instruction"] for row in samples]
+    assert samples[0]["instruction"] == 'Add the text "你好" to the sign.'
+    assert samples[0]["edit_mask"].sum().item() == 4
+    assert original.read_metadata(path)[0]["instruction"] == "添加物体 0"
+    # Official test prompts remain untouched.
+    assert next(InterEditReader(root, "test").iter_samples(count=1))[3]["instruction"] == "Add an object."
+
+
+@pytest.mark.parametrize("failure", ["missing", "wrong_id", "wrong_original", "duplicate"])
+def test_translation_mismatches_fail_instead_of_silently_dropping_rows(inter_edit, tmp_path, failure):
+    root, _ = inter_edit
+    directory = write_test_translations(root, tmp_path / "translated")
+    reader = InterEditReader(root, translations_dir=directory)
+    path = reader.metadata_files[0]
+    sidecar = directory / "shards" / path.name.removesuffix(".gz")
+    records = [json.loads(line) for line in sidecar.read_text().splitlines()]
+    if failure == "missing":
+        records.pop()
+    elif failure == "wrong_id":
+        records[0]["sample_id"] = 999
+    elif failure == "wrong_original":
+        records[0]["instruction_zh"] = "wrong source"
+    else:
+        records.append(records[0])
+    sidecar.write_text("".join(json.dumps(row) + "\n" for row in records))
+    with pytest.raises(ValueError, match="translation"):
+        reader.read_metadata(path)
+
+
+@pytest.mark.parametrize("failure", ["limited", "incomplete", "changed_source", "test_split"])
+def test_translation_overlay_rejects_incompatible_releases(inter_edit, tmp_path, failure):
+    root, _ = inter_edit
+    directory = write_test_translations(root, tmp_path / "translated")
+    split = "train"
+    if failure == "limited":
+        config = json.loads((directory / "run_config.json").read_text())
+        config["limit"] = 8
+        (directory / "run_config.json").write_text(json.dumps(config))
+    elif failure == "incomplete":
+        (directory / "summary.json").write_text(json.dumps({"complete": False, "pending": 1}))
+    elif failure == "changed_source":
+        metadata = next((root / "train/metadata").glob("*.gz"))
+        with metadata.open("ab") as handle:
+            handle.write(b"changed")
+    else:
+        split = "test"
+    with pytest.raises(ValueError):
+        InterEditReader(root, split=split, translations_dir=directory)
+
+
+def write_official_test_translations(root, directory):
+    from scripts import translate_inter_edit as translation
+
+    source_root, paths = translation.discover_inputs(root, "test")
+    directory.mkdir(parents=True)
+    args = translation.parse_args(["--split", "test", "--output-dir", str(directory)])
+    config = translation.run_config(args, source_root, paths)
+    records = [{**row, "instruction_en": f"Add translated object {row['sample_id']}."}
+               for row in translation.selected_rows(paths[0], split="test")]
+    (directory / "run_config.json").write_text(json.dumps(config))
+    (directory / "translations.jsonl").write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records))
+    (directory / "summary.json").write_text(json.dumps({"complete": True, "pending": 0,
+                                                        "selected": len(records), "translated": len(records)}))
+    return directory
+
+
+@pytest.mark.parametrize("metadata_format", ["json", "jsonl"])
+def test_official_test_translation_keeps_indices_assets_and_english_literal_text(inter_edit, tmp_path, metadata_format):
+    root, cache = inter_edit
+    metadata = root / "test/metadata.json"
+    english = {**json.loads(metadata.read_text())[0], "instruction": 'Write "你好" on the sign.'}
+    chinese = {**english, "index": 7, "language": "中文", "instruction": "在牌子上添加一个红色物体"}
+    rows = [english, chinese]
+    if metadata_format == "json":
+        metadata.write_text(json.dumps(rows, ensure_ascii=False))
+    else:
+        metadata.unlink()
+        metadata = root / "test/metadata.jsonl"
+        metadata.write_text("\n\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n")
+    original_bytes = metadata.read_bytes()
+    directory = write_official_test_translations(root, tmp_path / "translated-test")
+    reader = InterEditReader(root, "test", cache, translations_dir=directory)
+    assert reader.test_rows[0] == english
+    assert reader.test_rows[1]["instruction"] == "Add translated object 7."
+    assert reader.test_rows[1]["instruction_original"] == chinese["instruction"]
+    assert reader.test_rows[1]["language_original"] == "中文"
+    dataset = InterEditDataset(root, split="test", cache_dir=cache, translations_dir=directory,
+                              language="en", size=8, shuffle=False, repeat=False)
+    assert len(dataset) == 2
+    samples = list(dataset)
+    assert [sample["sample_id"] for sample in samples] == [0, 7]
+    assert all(sample["edit_mask"].sum() == 4 for sample in samples)
+    assert metadata.read_bytes() == original_bytes
+    assert InterEditReader(root, "test").test_rows == rows
+
+    from types import SimpleNamespace
+    from eval.benchmark_inter_edit import select_cases
+
+    selection, info = select_cases(SimpleNamespace(data_dir=root, tar_cache_dir=cache, translations_dir=directory,
+                                                  language="en", sample_indices=None, limit=None))
+    assert [case["test_index"] for case in selection] == [0, 7]
+    assert selection[1]["instruction_original"] == chinese["instruction"]
+    assert info["eligible_samples"] == 2 and info["instruction_variant"] == "translated_english"
+
+
+@pytest.mark.parametrize("failure", ["missing", "wrong_id", "wrong_original"])
+def test_official_test_translation_rejects_incomplete_or_mismatched_rows(inter_edit, tmp_path, failure):
+    root, cache = inter_edit
+    metadata = root / "test/metadata.json"
+    rows = json.loads(metadata.read_text())
+    rows[0].update(instruction="添加一个物体", language="中文")
+    metadata.write_text(json.dumps(rows, ensure_ascii=False))
+    directory = write_official_test_translations(root, tmp_path / "translated-test")
+    path = directory / "translations.jsonl"
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    if failure == "missing":
+        records.clear()
+    elif failure == "wrong_id":
+        records[0]["sample_id"] = 999
+    else:
+        records[0]["instruction_zh"] = "不同的原文"
+    path.write_text("".join(json.dumps(row) + "\n" for row in records))
+    with pytest.raises(ValueError, match="translation"):
+        InterEditReader(root, "test", cache, translations_dir=directory)

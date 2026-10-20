@@ -1,4 +1,4 @@
-"""Generate and score the official Inter-Edit test benchmark or its English subset."""
+"""Generate and score Inter-Edit test cases, optionally translating Chinese prompts."""
 import argparse
 import json
 from pathlib import Path
@@ -17,17 +17,24 @@ def parse_args(native_editmgt=False):
     parser = argparse.ArgumentParser(description=__doc__)
     add_benchmark_arguments(parser, "inter_edit", native_editmgt=native_editmgt)
     parser.add_argument("--data-dir", type=Path, default=Path(DEFAULT_INTER_EDIT_ROOT))
+    parser.add_argument("--translations-dir", type=Path, default=None,
+                        help="Optional completed test translation release; --language en then includes original Chinese cases.")
     parser.add_argument("--language", choices=["all", "en", "zh"], default="en")
     parser.add_argument("--sample-indices", nargs="+", type=int, default=None,
                         help="Optional original test indices, all of which must match --language.")
     parser.add_argument("--tar-cache-dir", type=Path, default=None)
+    parser.add_argument("--num-gpus", type=int, default=1,
+                        help="Local data-parallel replicas; each GPU processes independent test samples. Shell launchers default to 8.")
     args = parser.parse_args()
+    if args.num_gpus < 1:
+        parser.error("--num-gpus must be positive")
     validate_arguments(parser, args)
     return args
 
 
 def select_cases(args):
-    reader = InterEditReader(args.data_dir, "test", args.tar_cache_dir)
+    reader = InterEditReader(args.data_dir, "test", args.tar_cache_dir,
+                             translations_dir=getattr(args, "translations_dir", None))
     eligible = [row for row in reader.test_rows if matches_inter_edit_language(row, args.language)]
     if args.sample_indices is not None:
         indices = set(args.sample_indices)
@@ -47,17 +54,26 @@ def select_cases(args):
             "instruction": row["instruction"], "language": inter_edit_prompt_language(row),
             "edit_type": row["edit_type"], "prediction": f"images/{index:05d}.png",
             "source": spec("source_images.tar", "source_path"),
-            "target": spec("target_images.tar", "gt_path"), "mask": spec("masks.tar", "mask_path"),
+            "target": spec("target_images.tar", "gt_path"),
+            "mask": spec("masks.tar", "mask_path") if "mask_path" in row else None,
         })
+        for field in ("instruction_original", "language_original"):
+            if field in row:
+                selection[-1][field] = row[field]
     dataset = {
         "root": str(reader.root.resolve()), "split": "test", "language": args.language,
         "total_test_samples": len(reader.test_rows), "eligible_samples": len(eligible),
         "selected_samples": len(selection), "full_language_subset": len(selection) == len(eligible),
         "full_test_benchmark": len(selection) == len(reader.test_rows),
-        "metadata_file": file_identity(reader.root / "metadata.json"),
+        "metadata_file": file_identity(reader.metadata_files[0]),
         "archive_files": [file_identity(reader.root / name) for name in
                           ("source_images.tar", "target_images.tar", "masks.tar") if (reader.root / name).is_file()],
     }
+    if reader.translations is not None:
+        release = reader.translations
+        dataset.update(instruction_variant="translated_english", translation_model=release.config.get("model"),
+                       translation_files=[file_identity(release.root / name)
+                                          for name in ("run_config.json", "summary.json", "translations.jsonl")])
     return selection, dataset
 
 
@@ -69,12 +85,17 @@ def main(args):
     try:
         if args.stage == "metrics":
             names = validate_metric_inputs(args, "inter_edit", run.selection)
-        if args.stage != "metrics":
-            generate_benchmark(args, run, images)
-        if args.stage != "generate":
-            complete = score_benchmark(args, run, images, names)
+        if args.num_gpus > 1:
+            from src.benchmark_parallel import run_inter_edit_data_parallel
+
+            complete = run_inter_edit_data_parallel(args, run, names)
         else:
-            complete = json.loads((run.root / "generation_summary.json").read_text())["complete"]
+            if args.stage != "metrics":
+                generate_benchmark(args, run, images)
+            if args.stage != "generate":
+                complete = score_benchmark(args, run, images, names)
+            else:
+                complete = json.loads((run.root / "generation_summary.json").read_text())["complete"]
         print(f"Saved Inter-Edit outputs to {run.root}", flush=True)
         return 0 if complete else 1
     finally:

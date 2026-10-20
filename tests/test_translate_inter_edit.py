@@ -87,6 +87,115 @@ class TranslationTests(unittest.TestCase):
         for directory in ("shards", "errors"):
             (self.output / directory).mkdir(parents=True, exist_ok=True)
 
+    def create_test_metadata(self, jsonl_only=False):
+        directory = self.data / "test"
+        directory.mkdir(exist_ok=True)
+        rows = [{"index": index, "language": "中文" if index % 2 == 0 else "English",
+                 "instruction": f"添加物体 {index}" if index % 2 == 0 else 'Write "你好" on the sign.',
+                 "edit_type": "Add", "source_path": f"source_images/{index:05d}.jpg",
+                 "gt_path": f"target_images/{index:05d}.png", "mask_path": f"masks/{index:05d}.png"}
+                for index in range(16)]
+        path = directory / ("metadata.jsonl" if jsonl_only else "metadata.json")
+        if jsonl_only:
+            # Physical JSONL line numbers must survive blank lines and chunking.
+            path.write_text("\n\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+        else:
+            path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+        return path, rows
+
+    def test_test_split_uses_labels_and_stable_chunks_instead_of_train_shards(self):
+        source, original = self.create_test_metadata()
+        args = self.args("--split", "test", "--test-shard-size", "1", "--dry-run")
+        root, paths = translation.discover_inputs(self.data, "test")
+        self.assertEqual((root, paths), (source.parent, [source]))
+        tasks, count, done = translation.make_plan(args, paths)
+        self.assertEqual((len(tasks), count, done), (8, 8, 0))
+        self.assertEqual(len({task["checkpoint_name"] for task in tasks}), 8)
+        rows = [row for task in tasks for row in translation.task_rows(args, task)]
+        self.assertEqual([row["sample_id"] for row in rows], list(range(0, 16, 2)))
+        self.assertTrue(all(row["metadata_file"] == "metadata.json" for row in rows))
+        self.assertFalse(self.output.exists())
+        self.assertFalse(translation.needs_translation(original[1], "test"))
+        self.assertTrue(translation.needs_translation({"language": "CN", "instruction": "iPhone"}, "test"))
+        config = translation.run_config(args, root, paths)
+        self.assertEqual(config["source_test_dir"], str(root))
+        self.assertNotIn("source_train_dir", config)
+        train_config = translation.run_config(self.args(), self.train, self.paths)
+        self.assertEqual(train_config["format_version"], 1)
+        self.assertNotIn("split", train_config)
+        self.assertNotIn("test_shard_size", train_config)
+
+    def test_jsonl_test_chunks_preserve_physical_line_indices(self):
+        source, _ = self.create_test_metadata(jsonl_only=True)
+        args = self.args("--split", "test", "--test-shard-size", "3", "--dry-run")
+        _, paths = translation.discover_inputs(self.data / "test", "test")
+        self.assertEqual(paths, [source])
+        tasks, count, _ = translation.make_plan(args, paths)
+        selected = [row for task in tasks for row in translation.task_rows(args, task)]
+        self.assertEqual(count, 8)
+        self.assertEqual([row["row_index"] for row in selected], list(range(0, 32, 4)))
+        self.assertEqual([task["count"] for task in tasks], [3, 3, 2])
+
+    def test_limited_test_translation_does_not_export_a_partly_english_dataset(self):
+        source, _ = self.create_test_metadata()
+        self.prepare_output()
+        args = self.args("--split", "test", "--test-shard-size", "2", "--limit", "3")
+        tasks, total, _ = translation.make_plan(args, [source])
+
+        class Translator:
+            def translate(self, rows, attempt):
+                return [(f"Add object {row['sample_id']}.", "stop") for row in rows]
+
+        for task in tasks:
+            translation.process_shard(args, task, Translator())
+        summary = translation.merge_results(args, tasks, total, test_source=source)
+        self.assertEqual((summary["translated"], summary["complete"]), (3, True))
+        self.assertIsNone(summary["metadata_file"])
+        self.assertFalse((self.output / "metadata_en.json").exists())
+
+    def test_eight_test_replicas_resume_and_export_all_rows_without_changing_english(self):
+        source, original = self.create_test_metadata()
+        source_bytes = source.read_bytes()
+        fake_dir = self.root / "fake_modules"
+        fake_dir.mkdir()
+        (fake_dir / "vllm.py").write_text(FAKE_VLLM)
+        events_path = self.root / "test_events.jsonl"
+        env = {**os.environ, "PYTHONPATH": str(fake_dir), "FAKE_VLLM_EVENTS": str(events_path),
+               "FAKE_FAIL_PROMPT": "添加物体 0"}
+        command = [sys.executable, str(Path(translation.__file__)), "--data-dir", str(self.data),
+                   "--split", "test", "--test-shard-size", "1", "--batch-size", "1", "--retries", "0",
+                   "--gpu-ids", "0,1,2,3,4,5,6,7",
+                   "--output-dir", str(self.output)]
+        result = subprocess.run(command + ["--num-gpus", "8"], env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertFalse((self.output / "metadata_en.json").exists())
+        self.assertEqual(json.loads((self.output / "summary.json").read_text())["pending"], 1)
+        events = [json.loads(line) for line in events_path.read_text().splitlines()]
+        self.assertEqual(len([item for item in events if item["type"] == "init"]), 8)
+        self.assertEqual(len(list((self.output / "errors").glob("*.errors.json"))), 8)
+        count = len(events)
+        del env["FAKE_FAIL_PROMPT"]
+        result = subprocess.run(command + ["--num-gpus", "1"], env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = [json.loads(line) for line in events_path.read_text().splitlines()]
+        self.assertEqual([item["prompts"] for item in events[count:] if item["type"] == "generate"], [["添加物体 0"]])
+        exported = json.loads((self.output / "metadata_en.json").read_text())
+        self.assertEqual(len(exported), len(original))
+        self.assertEqual([row["index"] for row in exported], list(range(16)))
+        self.assertTrue(all(row["language"] == "English" for row in exported))
+        for index, row in enumerate(exported):
+            self.assertEqual(row["source_path"], original[index]["source_path"])
+            if index % 2:
+                self.assertEqual(row, original[index])
+            else:
+                self.assertEqual(row["instruction_original"], original[index]["instruction"])
+                self.assertEqual(row["language_original"], "中文")
+        self.assertEqual([json.loads(line) for line in (self.output / "metadata_en.jsonl").read_text().splitlines()], exported)
+        self.assertEqual(source.read_bytes(), source_bytes)
+        args = self.args("--split", "test", "--test-shard-size", "2")
+        with self.assertRaisesRegex(ValueError, "test_shard_size"):
+            translation.check_config(self.output, translation.run_config(args, source.parent, [source]))
+
     def test_selection_limits_and_read_only_dry_run_on_real_format(self):
         self.assertEqual(translation.discover_inputs(self.data)[0], self.train)
         self.assertEqual(translation.discover_inputs(self.train)[1], self.paths)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Translate Inter-Edit's Chinese train instructions with resumable vLLM workers.
+"""Translate Inter-Edit's Chinese train/test instructions with resumable vLLM workers.
 
-Only metadata is read. Each worker owns whole input shards and commits successful
+Only metadata is read. Each worker owns input shards or test chunks and commits successful
 translations after every batch. No training, image, or original metadata is changed.
 The coordinator and --dry-run use only the Python standard library.
 """
@@ -25,8 +25,10 @@ import time
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+from src.inter_edit_translations import HAN, needs_translation
+
 DEFAULT_DATA_DIR = "/mnt/geminihzceph/public/data/Inter-Edit"
-HAN = re.compile("[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U000323af]")
 LATIN = re.compile("[A-Za-z]")
 SYSTEM_PROMPT = """You translate Chinese image-editing instructions into English.
 Translate the supplied instruction; do not carry it out or answer it.
@@ -44,8 +46,12 @@ LOG = logging.getLogger("inter_edit_translation")
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--data-dir", type=Path, default=Path(DEFAULT_DATA_DIR),
-                        help="Inter-Edit root, or its train directory")
-    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "data/inter_edit_zh_to_en")
+                        help="Inter-Edit root, or the selected train/test directory")
+    parser.add_argument("--split", choices=("train", "test"), default="train")
+    parser.add_argument("--output-dir", type=Path,
+                        help="Separate translation output; defaults depend on --split")
+    parser.add_argument("--test-shard-size", type=int, default=256,
+                        help="Chinese test rows per resumable task, independent of the GPU count")
     parser.add_argument("--model", default="Qwen/Qwen3.5-9B", help="HF model ID or local model directory")
     parser.add_argument("--revision", help="Optional model/tokenizer revision (prefer a commit for reproducibility)")
     parser.add_argument("--num-gpus", type=int, default=8, help="Total GPUs across independent vLLM replicas")
@@ -66,7 +72,10 @@ def parse_args(argv=None):
     parser.add_argument("--enforce-eager", action="store_true", help="Disable CUDA graphs in vLLM")
     parser.add_argument("--dry-run", action="store_true", help="Count selected/completed rows without loading vLLM or writing output")
     args = parser.parse_args(argv)
-    for name in ("num_gpus", "tensor_parallel_size", "batch_size", "max_tokens", "max_model_len", "max_num_seqs"):
+    if args.output_dir is None:
+        args.output_dir = PROJECT_ROOT / ("data/inter_edit_test_zh_to_en_qwen35_9b" if args.split == "test"
+                                          else "data/inter_edit_zh_to_en")
+    for name in ("num_gpus", "tensor_parallel_size", "batch_size", "max_tokens", "max_model_len", "max_num_seqs", "test_shard_size"):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.num_gpus % args.tensor_parallel_size:
@@ -94,10 +103,15 @@ def gpu_groups(args):
     return [ids[i:i + args.tensor_parallel_size] for i in range(0, args.num_gpus, args.tensor_parallel_size)]
 
 
-def discover_inputs(data_dir):
+def discover_inputs(data_dir, split="train"):
     root = data_dir.resolve()
-    if (root / "train").is_dir():
-        root = root / "train"
+    if (root / split).is_dir():
+        root = root / split
+    if split == "test":
+        source = next((root / name for name in ("metadata.json", "metadata.jsonl") if (root / name).is_file()), None)
+        if source is None:
+            raise FileNotFoundError(f"Missing Inter-Edit test metadata.json or metadata.jsonl: {root}")
+        return root, [source]
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     paths = sorted((root / "metadata").glob("train-*.jsonl.gz"))
     if not paths or len(paths) != int(manifest["num_sample_shards"]):
@@ -105,19 +119,33 @@ def discover_inputs(data_dir):
     return root, paths
 
 
-def selected_rows(path, limit=None):
+def metadata_rows(path):
+    if path.suffix == ".json":
+        with path.open(encoding="utf-8") as handle:
+            rows = json.load(handle)
+        if not isinstance(rows, list):
+            raise ValueError(f"Expected an Inter-Edit metadata array: {path}")
+        yield from enumerate(rows)
+    else:
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rt", encoding="utf-8") as handle:
+            for index, line in enumerate(handle):
+                if line.strip():
+                    yield index, json.loads(line)
+
+
+def selected_rows(path, limit=None, split="train", row_start=0, row_end=None):
     rows = []
-    with gzip.open(path, "rt", encoding="utf-8") as handle:
-        for row_index, line in enumerate(handle):
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            instruction = row.get("instruction")
-            if isinstance(instruction, str) and HAN.search(instruction):
-                rows.append({"sample_id": row["sample_id"], "metadata_file": path.name,
-                             "row_index": row_index, "instruction_zh": instruction})
-                if limit is not None and len(rows) == limit:
-                    break
+    for row_index, row in metadata_rows(path):
+        if row_index < row_start:
+            continue
+        if row_end is not None and row_index >= row_end:
+            break
+        if needs_translation(row, split):
+            rows.append({"sample_id": row["index"] if split == "test" else row["sample_id"],
+                         "metadata_file": path.name, "row_index": row_index, "instruction_zh": row["instruction"]})
+            if limit is not None and len(rows) == limit:
+                break
     return rows
 
 
@@ -152,12 +180,17 @@ def run_config(args, root, paths):
     for path in paths:
         stat = path.stat()
         inputs.append({"name": path.name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
-    return {"format_version": 1, "source_train_dir": str(root), "inputs": inputs,
+    config = {"format_version": 1, "source_train_dir": str(root), "inputs": inputs,
             "model": args.model, "revision": args.revision, "max_tokens": args.max_tokens,
             "max_model_len": args.max_model_len, "dtype": args.dtype, "quantization": args.quantization,
             "seed": args.seed, "limit": args.limit,
             "system_prompt_sha256": hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest(),
             "enable_thinking": False, "temperature": 0.0}
+    # Keep existing train run_config.json byte-for-byte compatible in content.
+    if args.split == "test":
+        config.pop("source_train_dir")
+        config.update(format_version=2, split="test", source_test_dir=str(root), test_shard_size=args.test_shard_size)
+    return config
 
 
 def check_config(output_dir, config, write=False):
@@ -211,7 +244,7 @@ def read_checkpoint(path, expected, repair=False):
                 if any(record[key] != value for key, value in source.items()):
                     raise ValueError("Checkpoint does not match source metadata")
                 validate_translation(record["instruction_en"])
-                if record["instruction_en"].strip() == source["instruction_zh"].strip():
+                if record["instruction_en"].strip() == source["instruction_zh"].strip() and HAN.search(source["instruction_zh"]):
                     raise ValueError("Instruction was not translated")
                 if index in completed:
                     raise ValueError("Duplicate checkpoint record")
@@ -221,8 +254,16 @@ def read_checkpoint(path, expected, repair=False):
     return completed
 
 
-def checkpoint_path(output_dir, source):
-    return output_dir / "shards" / source.name.removesuffix(".gz")
+def checkpoint_path(output_dir, source, task=None):
+    name = task["checkpoint_name"] if task and "checkpoint_name" in task else source.name.removesuffix(".gz")
+    return output_dir / "shards" / name
+
+
+def task_rows(args, task):
+    if not task["count"]:
+        return []
+    return selected_rows(Path(task["source"]), task["count"], split=args.split,
+                         row_start=task.get("row_start", 0), row_end=task.get("row_end"))
 
 
 def make_plan(args, paths):
@@ -231,13 +272,19 @@ def make_plan(args, paths):
         remaining = None if args.limit is None else args.limit - total
         if remaining == 0:
             break
-        rows = selected_rows(source, remaining)
-        completed = read_checkpoint(checkpoint_path(args.output_dir, source), rows, repair=not args.dry_run)
-        task = {"source": str(source), "count": len(rows)}
-        tasks.append(task)
-        total += len(rows)
-        done += len(completed)
-        task["pending"] = len(rows) - len(completed)
+        rows = selected_rows(source, remaining, split=args.split)
+        chunks = [rows] if args.split == "train" else [rows[i:i + args.test_shard_size]
+                                                       for i in range(0, len(rows), args.test_shard_size)]
+        for chunk in chunks:
+            task = {"source": str(source), "count": len(chunk)}
+            if args.split == "test":
+                task.update(row_start=chunk[0]["row_index"], row_end=chunk[-1]["row_index"] + 1,
+                            checkpoint_name=f"test-{len(tasks):05d}.jsonl")
+            completed = read_checkpoint(checkpoint_path(args.output_dir, source, task), chunk, repair=not args.dry_run)
+            tasks.append(task)
+            total += len(chunk)
+            done += len(completed)
+            task["pending"] = len(chunk) - len(completed)
         if len(tasks) % 25 == 0:
             LOG.info("Scanned %d metadata shards: %d selected, %d saved", len(tasks), total, done)
     LOG.info("Selected %d Chinese instructions; %d saved; %d pending across %d shards",
@@ -284,8 +331,8 @@ class VLLMTranslator:
 
 def process_shard(args, task, translator):
     source = Path(task["source"])
-    rows = selected_rows(source, task["count"]) if task["count"] else []
-    path = checkpoint_path(args.output_dir, source)
+    rows = task_rows(args, task)
+    path = checkpoint_path(args.output_dir, source, task)
     completed = read_checkpoint(path, rows, repair=True)
     pending = [row for row in rows if row["row_index"] not in completed]
     failures = []
@@ -299,7 +346,7 @@ def process_shard(args, task, translator):
                 for row, (text, finish_reason) in zip(batch, responses):
                     try:
                         english = validate_translation(text, finish_reason)
-                        if english == row["instruction_zh"].strip():
+                        if english == row["instruction_zh"].strip() and HAN.search(row["instruction_zh"]):
                             raise ValueError("Instruction was not translated")
                         record = {**row, "instruction_en": english}
                         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -316,9 +363,10 @@ def process_shard(args, task, translator):
                 batch = retry
                 if not batch:
                     break
-            LOG.info("%s: %d/%d saved; %.1f rows/s this run", source.name, len(completed), len(rows),
+            LOG.info("%s: %d/%d saved; %.1f rows/s this run", path.name, len(completed), len(rows),
                      (start + len(pending[start:start + args.batch_size])) / max(time.monotonic() - started, 0.001))
-    atomic_json(args.output_dir / "errors" / f"{source.name}.errors.json", failures)
+    error_name = task.get("checkpoint_name", source.name)
+    atomic_json(args.output_dir / "errors" / f"{error_name}.errors.json", failures)
     return len(failures)
 
 
@@ -372,7 +420,7 @@ def run_workers(args, tasks, groups):
     if not pending:
         return
     if importlib.util.find_spec("vllm") is None:
-        raise RuntimeError("vLLM is not installed in this Python environment. See scripts/README_translate_inter_edit.md.")
+        raise RuntimeError("vLLM is not installed in this Python environment. See the Inter-Edit translation instructions in README.md.")
     ctx = mp.get_context("spawn")
     task_queue = ctx.Queue()
     for task in pending:
@@ -399,15 +447,44 @@ def run_workers(args, tasks, groups):
         task_queue.close()
 
 
-def merge_results(args, tasks, total):
+def export_test_metadata(args, source):
+    """Export all test rows, retaining asset paths, indices and original English."""
+    expected = selected_rows(source, split="test")
+    translations = read_checkpoint(args.output_dir / "translations.jsonl", expected)
+    if len(translations) != len(expected):
+        raise ValueError("Full English test metadata requires every Chinese instruction to be translated")
+    rows = []
+    for index, row in metadata_rows(source):
+        item = translations.get(index)
+        if item is not None:
+            row = {**row, "instruction_original": row["instruction"],
+                   **({"language_original": row["language"]} if "language" in row else {}),
+                   "instruction": item["instruction_en"].strip(), "language": "English"}
+        rows.append(row)
+    atomic_json(args.output_dir / "metadata_en.json", rows)
+    temporary = args.output_dir / "metadata_en.jsonl.tmp"
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, args.output_dir / "metadata_en.jsonl")
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {"metadata_file": "metadata_en.json", "metadata_jsonl_file": "metadata_en.jsonl",
+            "metadata_samples": len(rows)}
+
+
+def merge_results(args, tasks, total, test_source=None):
     temporary = args.output_dir / "translations.jsonl.tmp"
     saved = 0
     try:
         with temporary.open("w", encoding="utf-8") as handle:
             for task in tasks:
                 source = Path(task["source"])
-                rows = selected_rows(source, task["count"]) if task["count"] else []
-                records = read_checkpoint(checkpoint_path(args.output_dir, source), rows, repair=True)
+                rows = task_rows(args, task)
+                records = read_checkpoint(checkpoint_path(args.output_dir, source, task), rows, repair=True)
                 for row in rows:
                     if row["row_index"] in records:
                         handle.write(json.dumps(records[row["row_index"]], ensure_ascii=False) + "\n")
@@ -419,6 +496,10 @@ def merge_results(args, tasks, total):
                    "output_file": "translations.jsonl" if saved == total else None}
         if saved == total:
             os.replace(temporary, args.output_dir / "translations.jsonl")
+        if args.split == "test":
+            summary.update(split="test", metadata_file=None, metadata_jsonl_file=None)
+            if saved == total and args.limit is None:
+                summary.update(export_test_metadata(args, test_source))
         atomic_json(args.output_dir / "summary.json", summary)
         return summary
     finally:
@@ -428,10 +509,10 @@ def merge_results(args, tasks, total):
 def main(argv=None):
     args = parse_args(argv)
     configure_logging()
-    root, paths = discover_inputs(args.data_dir)
+    root, paths = discover_inputs(args.data_dir, args.split)
     args.output_dir = args.output_dir.resolve()
     if args.output_dir == root or root in args.output_dir.parents:
-        raise ValueError("--output-dir must be outside the original train directory")
+        raise ValueError("--output-dir must be outside the original source split directory")
     config = run_config(args, root, paths)
     if args.dry_run:
         check_config(args.output_dir, config)
@@ -448,7 +529,7 @@ def main(argv=None):
         LOG.info("Using up to %d replicas, %d GPUs per replica; automatic resume is enabled",
                  len(groups), args.tensor_parallel_size)
         run_workers(args, tasks, groups)
-        summary = merge_results(args, tasks, total)
+        summary = merge_results(args, tasks, total, test_source=paths[0] if args.split == "test" else None)
         LOG.info("Result: %s", summary)
         return 0 if summary["complete"] else 1
 

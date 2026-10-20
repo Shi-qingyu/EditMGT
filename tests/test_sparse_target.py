@@ -8,6 +8,7 @@ from peft import LoraConfig
 from peft.utils import get_peft_model_state_dict
 
 from src.sparse_utils import SparseTargetLayout, prepare_sparse_target_layout
+from src.reference_cache import ConditionKVCache, ReferenceKVCache
 from src.transformer import Transformer2DModel, load_lora_adapter
 from src.v2_utils import apply_branch_rotary_emb
 from diffusers.models.embeddings import apply_rotary_emb
@@ -77,6 +78,44 @@ def test_scatter_preserves_background_and_does_not_write_padding():
     assert sparse.grad[~layout.valid].eq(0).all()
     assert base.grad[0, 1].eq(0).all()
     assert base.grad[0, 0].eq(1).all()
+
+
+@pytest.mark.parametrize("base_dtype,sparse_dtype,output_dtype", [
+    (torch.bfloat16, torch.float32, torch.float32),
+    (torch.float32, torch.bfloat16, torch.float32),
+    (torch.float16, torch.float32, torch.float32),
+    (torch.bfloat16, torch.float16, torch.float32),
+    (torch.bfloat16, torch.bfloat16, torch.bfloat16),
+    (torch.float32, torch.float32, torch.float32),
+])
+def test_scatter_mixed_precision_preserves_values_and_gradients(base_dtype, sparse_dtype, output_dtype):
+    args = inputs(batch=3)  # Ragged active sets, padding, and an empty sample.
+    layout = prepare_sparse_target_layout(
+        args["target_edit_mask"], (6, 8), (3, 4), 3, torch.device("cpu"), 0,
+    )
+    base = (torch.arange(180).reshape(3, 12, 5) / 101).to(base_dtype).requires_grad_()
+    sparse = torch.full(
+        (*layout.indices.shape, 5), 1.234567, dtype=sparse_dtype, requires_grad=True,
+    )
+    original_base = base.detach().clone()
+    expected = original_base.to(output_dtype).clone()
+    active = torch.zeros(3, 12, dtype=torch.bool)
+    for batch_index in range(3):
+        indices = layout.indices[batch_index, layout.valid[batch_index]]
+        active[batch_index, indices] = True
+        expected[batch_index, indices] = sparse.detach()[batch_index, layout.valid[batch_index]].to(output_dtype)
+
+    output = layout.scatter(sparse, base)
+    assert output.dtype == output_dtype
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    torch.testing.assert_close(base.detach(), original_base, rtol=0, atol=0)
+    output.sum().backward()
+    torch.testing.assert_close(
+        base.grad, (~active)[..., None].expand_as(base).to(base_dtype), rtol=0, atol=0,
+    )
+    torch.testing.assert_close(
+        sparse.grad, layout.valid[..., None].expand_as(sparse).to(sparse_dtype), rtol=0, atol=0,
+    )
 
 
 def test_every_block_receives_sparse_target_full_reference_and_original_rope():
@@ -179,6 +218,48 @@ def test_empty_edit_mask_is_finite_and_keeps_entire_background():
     args["target_edit_mask"].zero_()
     with torch.no_grad():
         assert torch.isfinite(model(**args)).all()
+
+
+@pytest.mark.parametrize("cache_mode", ["condition", "reference"])
+def test_bf16_autocast_cache_prefill_and_reuse_keep_qkv_dtype_consistent(cache_mode):
+    # Match training validation: FP32 Transformer parameters, BF16 autocast,
+    # ragged sparse targets, and both double/single attention blocks.
+    model = tiny_model().eval()
+    args = inputs()
+    if cache_mode == "condition":
+        model.enable_condition_cache_training(threshold=0.8)
+        model.set_time_conditioning("mask_ratio")
+        args["mask_ratio"] = 0.2
+        cache = ConditionKVCache()
+        cache_args = {"condition_kv_cache": cache}
+    else:
+        cache = ReferenceKVCache()
+        cache_args = {"reference_kv_cache": cache}
+    assert next(model.parameters()).dtype == torch.float32
+
+    observed_sdpa_dtypes = []
+    original_sdpa = torch.nn.functional.scaled_dot_product_attention
+
+    def capture_sdpa(query, key, value, **kwargs):
+        observed_sdpa_dtypes.append((query.dtype, key.dtype, value.dtype))
+        return original_sdpa(query, key, value, **kwargs)
+
+    with torch.no_grad(), torch.autocast("cpu", dtype=torch.bfloat16), \
+            patch("src.v2_utils.F.scaled_dot_product_attention", side_effect=capture_sdpa):
+        expected = model(**args)
+        prefill = model(**args, **cache_args)
+        assert cache.ready and cache.num_layers == 4
+        reused_args = dict(args, reference_image_hidden_states=None, reference_image_ids=None)
+        if cache_mode == "condition":
+            reused_args.update(encoder_hidden_states=None, txt_ids=None)
+        reused = model(**reused_args, **cache_args)
+
+    assert observed_sdpa_dtypes
+    assert all(dtypes == (torch.bfloat16,) * 3 for dtypes in observed_sdpa_dtypes)
+    assert all(tensor.dtype == torch.bfloat16 for tensors in cache._layers.values() for tensor in tensors)
+    assert torch.isfinite(reused).all()
+    torch.testing.assert_close(prefill, expected, rtol=0, atol=0)
+    torch.testing.assert_close(reused, expected, rtol=2e-2, atol=2e-2)
 
 
 def test_checkpoint_round_trip_and_dense_checkpoint_upgrade(tmp_path):
@@ -312,3 +393,48 @@ def test_pipeline_preserves_source_at_all_steps_and_duplicates_cfg_mask(guidance
     pipe(**common)
     assert observed_masks[-1] is None
     handle.remove()
+
+
+@pytest.mark.parametrize("preserve_rgb", [False, True])
+def test_pipeline_decodes_composed_tokens_without_rgb_compositing_by_default(preserve_rgb):
+    from PIL import Image
+    from diffusers import VQModel
+    from src.pipeline import Pipeline
+    from src.scheduler import Scheduler
+    from src.v2_utils import prepare_cond_token
+
+    model = tiny_model().eval()
+    vq = VQModel(block_out_channels=(16,), latent_channels=4, vq_embed_dim=4,
+                 num_vq_embeddings=31, norm_num_groups=4, lookup_from_codebook=True).eval()
+    pipe = Pipeline(vq, None, None, model, Scheduler(mask_token_id=31), None, None)
+    pipe.set_progress_bar_config(disable=True)
+    source = Image.new("RGB", (16, 16), (80, 140, 50))
+    pixel_mask = torch.zeros(1, 1, 16, 16)
+    pixel_mask[:, :, 4:8, 6:10] = 1
+    frames = []
+    # Leave the argument out in the default case to catch accidental changes
+    # that would copy source RGB after the already-composed tokens are decoded.
+    extra = {"preserve_unmasked_pixels": True} if preserve_rgb else {}
+    result = pipe(
+        prompt_embeds=torch.zeros(1, 8), encoder_hidden_states=torch.zeros(1, 3, 24),
+        reference_image=[source], mask_image=pixel_mask,
+        height=16, width=16, num_inference_steps=2, guidance_scale=1.0,
+        sparse_target=True, sparse_target_halo=0, output_type="pt", temperature=0.0,
+        callback=lambda step, time, tokens: frames.append(tokens.clone()), **extra,
+    ).images
+    source_rgb = pipe.image_processor.preprocess(source, height=16, width=16)
+    with torch.no_grad():
+        source_tokens = prepare_cond_token(None, source_rgb, vq).reshape(1, 16, 16)
+        decoded = pipe.safe_decode_latents(frames[-1], 1, 16, 16, "pt")
+    outside_tokens = ~pixel_mask[:, 0].bool()
+    for tokens in frames:
+        assert torch.equal(tokens[outside_tokens], source_tokens[outside_tokens])
+    if preserve_rgb:
+        expected = torch.where(pixel_mask.bool(), decoded, source_rgb)
+    else:
+        expected = decoded
+        outside_rgb = ~pixel_mask.bool().expand_as(decoded)
+        assert (decoded[outside_rgb] != source_rgb[outside_rgb]).any()
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+    assert pipe.last_edit_region_info["preserve_unmasked_pixels"] == preserve_rgb
+    assert pipe.last_edit_region_info["output_compositing"] == ("original_pixel_mask" if preserve_rgb else "none")

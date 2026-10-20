@@ -104,13 +104,15 @@ def test_training_receives_the_same_white_edit_region(magicbrush_cutout_data):
     assert torch.equal(mask, expected)
 
 
+@pytest.mark.parametrize("preserve_rgb", [False, True])
 def test_decoded_mask_reaches_pipeline_and_controls_native_pixel_compositing(
-    magicbrush_cutout_data, tmp_path, monkeypatch,
+    magicbrush_cutout_data, tmp_path, monkeypatch, preserve_rgb,
 ):
     _, _, _, source, spec = magicbrush_cutout_data
     monkeypatch.setattr(sys, "argv", [
         "benchmark_magicbrush.py", "--vanilla", "--stage", "generate", "--device", "cpu",
         "--resolution", "64", "--warmup", "0", "--output-dir", str(tmp_path / "output"),
+        *(["--preserve-unmasked-pixels"] if preserve_rgb else []),
     ])
     args = parse_args()
     calls = []
@@ -151,19 +153,34 @@ def test_decoded_mask_reaches_pipeline_and_controls_native_pixel_compositing(
         assert pipeline_mask.mode == "L" and pipeline_mask.size == (64, 64)
         assert pipeline_mask.getbbox() == (16, 16, 48, 48)
         assert calls[0]["edit_only_diffusion"] and calls[0]["sparse_target"]
+        assert calls[0]["preserve_unmasked_pixels"] == preserve_rgb
         with Image.open(run.image_path(task)) as generated:
             pixels = np.asarray(generated)
         roi = np.asarray(decode_magicbrush_edit_mask(_cutout())) > 0
-        assert np.array_equal(pixels[~roi], np.asarray(source)[~roi])
+        if preserve_rgb:
+            assert np.array_equal(pixels[~roi], np.asarray(source)[~roi])
+        else:
+            assert np.all(pixels[~roi] == (255, 0, 0))
         assert np.all(pixels[roi] == (255, 0, 0))
         record = run.record(task["key"])
         assert record["edit_mask_decoding"] == MAGICBRUSH_MASK_DECODING
         assert record["input_mask"]["edit_fraction"] == 0.25
         assert record["input_mask"]["native_edit_bbox"] == [8, 8, 24, 24]
+        assert record["preserve_unmasked_pixels"] == preserve_rgb
+        assert record["output_compositing"] == (
+            "original_pixel_mask_at_generation_and_native_resolution" if preserve_rgb else "none"
+        )
         assert run.info["settings"]["generation"]["edit_mask_decoding"] == MAGICBRUSH_MASK_DECODING
     finally:
         images.close()
         run.close()
+
+    # A compositing-policy change must not silently reuse earlier predictions.
+    args.resume = True
+    args.preserve_unmasked_pixels = not preserve_rgb
+    with pytest.raises(ValueError, match="Output already exists"):
+        BenchmarkRun(args, "magicbrush", [task], {"split": "dev"})
+    args.preserve_unmasked_pixels = preserve_rgb
 
     # Old masked outputs cannot be silently reused after the decoder changes.
     saved = json.loads((args.output_dir / "run.json").read_text())

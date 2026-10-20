@@ -58,6 +58,53 @@ def resize_binary_edit_mask(mask: Image.Image, size: Tuple[int, int]) -> Image.I
     return mask
 
 
+def random_mask_to_bbox(
+    pixel_edit_mask: torch.Tensor,
+    probability: float,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Replace each selected [B,1,H,W] mask with its tight, filled bounding box.
+
+    Sample independently per example using the device's torch RNG. Return the
+    augmented masks and a [B] boolean selection flag. Empty masks stay empty;
+    disconnected regions share one box. Inputs are never modified in place.
+    Probability zero returns the input without consuming random numbers.
+    """
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("Mask-to-bbox probability must be between 0 and 1")
+    if pixel_edit_mask.ndim != 4 or pixel_edit_mask.shape[1] != 1:
+        raise ValueError("pixel_edit_mask must have shape [B,1,H,W]")
+    batch_size, _, height, width = pixel_edit_mask.shape
+    if height < 1 or width < 1:
+        raise ValueError("Edit mask dimensions must be positive")
+    selected = torch.zeros(batch_size, dtype=torch.bool, device=pixel_edit_mask.device)
+    if probability == 0.0:
+        return pixel_edit_mask, selected
+
+    positive = pixel_edit_mask[:, 0].ge(0.5)
+    nonempty = positive.flatten(1).any(dim=-1)
+    selected = nonempty if probability == 1.0 else (
+        nonempty & (torch.rand(batch_size, device=pixel_edit_mask.device) < probability)
+    )
+    rows = torch.arange(height, device=pixel_edit_mask.device)
+    cols = torch.arange(width, device=pixel_edit_mask.device)
+    row_support = positive.any(dim=-1)
+    col_support = positive.any(dim=-2)
+    top = torch.where(row_support, rows, height).amin(dim=-1)
+    bottom = torch.where(row_support, rows, -1).amax(dim=-1)
+    left = torch.where(col_support, cols, width).amin(dim=-1)
+    right = torch.where(col_support, cols, -1).amax(dim=-1)
+    bbox = (
+        (rows[None, :, None] >= top[:, None, None])
+        & (rows[None, :, None] <= bottom[:, None, None])
+        & (cols[None, None, :] >= left[:, None, None])
+        & (cols[None, None, :] <= right[:, None, None])
+    )
+    augmented = torch.where(
+        selected[:, None, None, None], bbox[:, None].to(pixel_edit_mask.dtype), pixel_edit_mask,
+    )
+    return augmented, selected
+
+
 def prepare_edit_only_corruption(
     target_tokens: torch.Tensor,
     source_tokens: torch.Tensor,

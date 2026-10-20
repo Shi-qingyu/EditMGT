@@ -348,6 +348,15 @@ class ConFluxAttnProcessor2_0:
             query = apply_branch_rotary_emb(query, image_rotary_emb)
             key = apply_branch_rotary_emb(key, image_rotary_emb)
 
+        # With FP32 model weights under BF16/FP16 autocast, RMSNorm can
+        # promote Q/K to FP32 while the projected V stays in the autocast
+        # dtype. Normalize/RoPE first, then restore the attention compute
+        # dtype before cache capture or lookup. This also keeps cached and
+        # uncached SDPA inputs consistent outside autocast.
+        attention_dtype = value.dtype
+        query = query.to(dtype=attention_dtype)
+        key = key.to(dtype=attention_dtype)
+
         main_query_length = query.shape[2]
         main_key_length = key.shape[2]
         reference_query, reference_key, reference_value = None, None, None
@@ -373,6 +382,10 @@ class ConFluxAttnProcessor2_0:
             if reference_image_rotary_emb is not None:
                 reference_query = apply_branch_rotary_emb(reference_query, reference_image_rotary_emb)
                 reference_key = apply_branch_rotary_emb(reference_key, reference_image_rotary_emb)
+
+            reference_query = reference_query.to(dtype=attention_dtype)
+            reference_key = reference_key.to(dtype=attention_dtype)
+            reference_value = reference_value.to(dtype=attention_dtype)
 
             if reference_kv_cache is not None:
                 # Store only the complete reference K/V, already normalized and

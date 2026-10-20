@@ -3,5 +3,9 @@ checkpoint
 outputs
 runs
 wandb
+.venv/
+.venv.backup-*
+.tools/
+.cache/
 
 *.pyc

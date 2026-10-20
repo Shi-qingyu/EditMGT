@@ -46,10 +46,15 @@ class ReferenceKVCache:
         if layer not in self._layers:
             raise ValueError(f"Reference cache has no entry for {layer}")
         key, value = self._layers[layer]
-        if (key.shape[0], key.shape[1], key.shape[3]) != (query.shape[0], query.shape[1], query.shape[3]):
-            raise ValueError("Reference cache batch/head dimensions differ from the current queries")
-        if key.device != query.device or key.dtype != query.dtype:
-            raise ValueError("Reference cache device/dtype differs from the current queries")
+        for name, tensor in (("key", key), ("value", value)):
+            if (tensor.shape[0], tensor.shape[1], tensor.shape[3]) != (
+                query.shape[0], query.shape[1], query.shape[3]
+            ) or tensor.device != query.device or tensor.dtype != query.dtype:
+                raise ValueError(
+                    f"Reference cache and query batch/head/device/dtype differ at {layer} ({name}): "
+                    f"cached shape={tuple(tensor.shape)}, device={tensor.device}, dtype={tensor.dtype}; "
+                    f"query shape={tuple(query.shape)}, device={query.device}, dtype={query.dtype}"
+                )
         return key, value
 
     @property
@@ -63,16 +68,20 @@ class ReferenceKVCache:
 
 
 class ConditionKVCache:
-    """Full text/reference K/V for the low-noise, target-independent prefix.
+    """Text/reference K/V, normally from the low-noise, target-independent prefix.
 
     A complete low-noise forward prefills every layer. Subsequent forwards omit
     both context branches, including their queries, normalization and FFNs.
     Keys are stored after QK normalization and RoPE. CFG halves stay separate.
     This object belongs to one generation; target tensors are never retained.
+    ``allow_early_capture`` explicitly enables approximate high-noise snapshots
+    for reuse-length ablations. The trained phase policy remains unchanged;
+    the captured context is frozen even when the low-noise phase starts.
     """
 
-    def __init__(self):
+    def __init__(self, allow_early_capture=False):
         self._layers = {}
+        self.allow_early_capture = bool(allow_early_capture)
         self.text_length = 0
         self.reference_length = 0
         self.pooled_projections = None
@@ -112,11 +121,15 @@ class ConditionKVCache:
         if not self.ready or layer not in self._layers:
             raise ValueError("Prefill the complete condition cache before reuse")
         tensors = self._layers[layer]
-        for tensor in tensors:
+        for name, tensor in zip(("text_key", "text_value", "reference_key", "reference_value"), tensors):
             if (tensor.shape[0], tensor.shape[1], tensor.shape[3]) != (
                 query.shape[0], query.shape[1], query.shape[3]
             ) or tensor.device != query.device or tensor.dtype != query.dtype:
-                raise ValueError("Condition cache and target query batch/head/device/dtype differ")
+                raise ValueError(
+                    f"Condition cache and target query batch/head/device/dtype differ at {layer} ({name}): "
+                    f"cached shape={tuple(tensor.shape)}, device={tensor.device}, dtype={tensor.dtype}; "
+                    f"query shape={tuple(query.shape)}, device={query.device}, dtype={query.dtype}"
+                )
         return tensors
 
     @property

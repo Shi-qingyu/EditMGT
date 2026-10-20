@@ -13,11 +13,13 @@ from PIL import Image
 from torchvision import transforms
 
 from src.mask_utils import normalize_edit_mask_image
+from src.pie_bench_metrics import DEFAULT_PIE_METRICS, PIE_METRICS
 
 
 DEFAULT_METRICS = {
     "inter_edit": ("lpips", "alpha-in", "alpha-out", "boundary"),
     "magicbrush": ("l1", "l2", "clip-i", "dino", "clip-t"),
+    "pie_bench": DEFAULT_PIE_METRICS,
 }
 DIRECTIONS = {
     "l1": "lower", "l2": "lower", "clip-i": "higher", "dino": "higher",
@@ -28,7 +30,7 @@ DIRECTIONS = {
 
 def parse_metrics(value, benchmark):
     names = tuple(part.strip().lower() for part in value.split(",") if part.strip())
-    allowed = set(DEFAULT_METRICS[benchmark]) | {"l1", "l2"}
+    allowed = set(PIE_METRICS) if benchmark == "pie_bench" else set(DEFAULT_METRICS[benchmark]) | {"l1", "l2"}
     if not names or len(set(names)) != len(names) or set(names) - allowed:
         raise ValueError(f"Choose distinct metrics from {sorted(allowed)}")
     return names

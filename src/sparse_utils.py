@@ -69,12 +69,16 @@ class SparseTargetLayout:
 
     @torch.compiler.disable
     def scatter(self, sequence: torch.Tensor, full_sequence: torch.Tensor) -> torch.Tensor:
-        """Replace active positions once; retain the pre-Transformer background."""
+        """Replace active positions, preserving background and promoted precision."""
         batch, length, channels = full_sequence.shape
         offsets = torch.arange(batch, device=self.indices.device)[:, None] * length
         flat_indices = (self.indices + offsets)[self.valid]
-        return full_sequence.reshape(-1, channels).index_copy(
-            0, flat_indices, sequence[self.valid]
+        # Autocast can leave the stem/background in BF16 while Transformer
+        # residuals are FP32. index_copy does not perform type promotion;
+        # preserve both branches' precision and keep the casts differentiable.
+        dtype = torch.promote_types(full_sequence.dtype, sequence.dtype)
+        return full_sequence.to(dtype=dtype).reshape(-1, channels).index_copy(
+            0, flat_indices, sequence[self.valid].to(dtype=dtype)
         ).reshape(batch, length, channels)
 
 
