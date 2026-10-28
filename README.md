@@ -845,3 +845,68 @@ The repository's [LICENSE](LICENSE) is **CC-BY-4.0**.
   year={2025}
 }
 ```
+
+## Region-DiMO: One-Step Regional Editing
+
+Region-DiMO distills an EditMGT SFT Teacher into a one-step regional image editor. It adds independent training, inference and benchmark entries; existing EditMGT workflows remain available.
+
+### Method
+
+- **Frozen SFT Teacher:** provides the target token distribution.
+- **One-step Student:** samples visual tokens once with independent categorical sampling.
+- **Auxiliary distribution matching:** supplies the FKL surrogate direction and learns Student samples with hard cross-entropy. Student and Auxiliary updates use separate batches.
+- **Student EMA:** maintains a moving-average inference model.
+- **Mask-constrained generation and Halo:** generate within the edit region plus the configured Halo and lock source tokens outside it. Pass the original mask to the Transformer; decode the complete VQ token grid directly by default.
+
+### Training
+
+The v3 preset uses Teacher CFG=6, Student/Auxiliary CFG=1, frozen Student/Auxiliary embeddings and MLM heads, Student embedding perturbation=0.3, constant LR with 100-update warmup, AdamW (LR=1e-6, weight decay=0.01), and distillation Halo=1 with supervision enabled. It preserves per-sample FKL, Auxiliary hard CE with label smoothing=0.1, r_init=1 and EMA decay=0.9999 with warmup.
+
+Copy `configs/dimo/region_dimo_v3.example.json` to a private configuration and fill exactly one SFT Teacher source, the base-component directory, training data/manifest settings and a **new** output directory. Do not resume an old B0 experiment with this recipe. Prepare `.venv` using the setup instructions above, then run:
+
+```bash
+export DIMO_CONFIG=/path/to/private_dimo_v3.json
+.venv/bin/python -m src.dimo.preflight --config "$DIMO_CONFIG"
+bash scripts/dimo/run_formal.sh --stop-after-preflight
+# After the bounded preflight succeeds, continue the same v3 run:
+bash scripts/dimo/run_formal.sh --resume latest
+```
+
+The launcher respects `CUDA_VISIBLE_DEVICES`; only explicit `GPU_IDS` overrides it. `NUM_PROCESSES` defaults to the visible GPU count. Set `DIMO_PYTHON` for an external prepared environment. Each rank holds all model roles; DDP does not partition their memory.
+
+### One-Step Inference
+
+Use `student` for raw weights or `ema` for averaged weights:
+
+```bash
+export DIMO_CHECKPOINT=/path/to/new_dimo_run/checkpoint-2000
+export BASE_MODEL_DIR=/path/to/EditMGT-base
+for model in student ema; do
+  .venv/bin/python -m src.dimo.infer \
+    --checkpoint "$DIMO_CHECKPOINT" --model "$model" --base-model-dir "$BASE_MODEL_DIR" \
+    --source source.png --mask mask.png --prompt 'Make the object red.' \
+    --output "outputs/dimo_${model}.png"
+done
+```
+
+Inference uses CFG=1, embedding perturbation=0 and the checkpoint's saved Halo and supervision settings. `--halo 0` or `--halo 1` explicitly overrides the profile. RGB compositing is optional via `--preserve-unmasked-pixels`; the default is direct VQ decode.
+
+### Benchmarks
+
+The DiMO adapter reuses EditMGT's data order, prompts, masks, GPU sharding and metrics. Select `--backend student` or `--backend ema`; both use the saved Halo profile unless `--sparse-target-halo` is explicitly supplied. Effective Halo, supervision and their source are recorded in the output metadata.
+
+```bash
+.venv/bin/python -m src.dimo.benchmark --benchmark magicbrush --backend ema \
+  --checkpoint "$DIMO_CHECKPOINT" --model-path "$BASE_MODEL_DIR" \
+  --data-dir /path/to/MagicBrush --split test --mode both \
+  --guidance-scale 1 --num-inference-steps 1 --metrics l1,l2 \
+  --output-dir outputs/dimo_magicbrush
+
+.venv/bin/python -m src.dimo.benchmark --benchmark inter_edit --backend ema \
+  --checkpoint "$DIMO_CHECKPOINT" --model-path "$BASE_MODEL_DIR" \
+  --data-dir /path/to/Inter-Edit --language en \
+  --guidance-scale 1 --num-inference-steps 1 --metrics l1,l2 \
+  --output-dir outputs/dimo_inter_edit
+```
+
+These examples select L1/L2; use the benchmark-specific metric options above for full scoring. Add `--num-gpus N` and `--bf16` explicitly when needed. `--backend teacher` retains the original benchmark defaults, including Halo=0; choose Teacher steps/CFG and a shared composition policy explicitly for comparisons. See [the Region-DiMO guide](docs/region_dimo.md) for checkpoint and configuration details.
