@@ -791,6 +791,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         reference_kv_cache: Optional[ReferenceKVCache] = None,
         condition_kv_cache: Optional[ConditionKVCache] = None,
         mask_ratio: Optional[Union[float, torch.Tensor]] = None,
+        noise_emb_perturb: float = 0.0,
     ) -> Union[torch.FloatTensor, Transformer2DModelOutput]:
         """
         The [`FluxTransformer2DModel`] forward method.
@@ -928,6 +929,13 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
             encoder_hidden_states = self.encoder_proj_layer_norm(encoder_hidden_states)
 
         hidden_states = self.embed(hidden_states) # output will be [2,768,16,16] # [2, 1024, 16, 16] 
+        # Optional DiMO noise applies only to target embeddings. The default
+        # consumes no RNG and preserves all existing SFT/inference callers.
+        if isinstance(noise_emb_perturb, bool) or not 0.0 <= noise_emb_perturb < 1.0:
+            raise ValueError("noise_emb_perturb must be finite and in [0,1)")
+        if noise_emb_perturb > 0:
+            hidden_states = ((1.0 - noise_emb_perturb ** 2) ** 0.5 * hidden_states
+                             + noise_emb_perturb * torch.randn_like(hidden_states))
         hidden_states = self.down_block(hidden_states)
 
         batch_size, channels, height, width = hidden_states.shape
