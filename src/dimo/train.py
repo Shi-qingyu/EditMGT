@@ -12,7 +12,7 @@ from src.dimo.device import initialize_local_cuda_device
 from src.dimo.origin import select_teacher, load_strict, sha256, weight_files
 from src.dimo.core import (clone_models, generation_mask, predict, distillation_losses,
                            auxiliary_ce, update_ema, generate_one_step, pseudo_mask)
-from src.dimo.data import ReplayStream
+from src.dimo.data import ReplayStream, local_stream_args
 from src.dimo.checkpoint import (collective_call, save_checkpoint, load_checkpoint,
                                   check_roundtrip, read_progress, verify_checkpoint, state_digest,
                                   validate_progress, microbatches_per_update, prune_checkpoints)
@@ -46,17 +46,10 @@ def dataset_stream(c, tokenizer, acc, consumed):
     if c.get('data_manifest'):
         from src.dimo.manifest_data import manifest_stream
         return manifest_stream(c, tokenizer, acc, consumed)
-    from src.inter_edit_dataset import InterEditDataset
-    from src.magicbrush_dataset import MagicBrushDataset
-    from src.mixed_edit_dataset import MixedEditDataset
-    common = dict(tokenizer=tokenizer, size=c['resolution'], text_encoder_architecture='CLIP_Gemma2',
-                  rank=acc.process_index, world_size=acc.num_processes, seed=c['seed'], language=c['language'])
-    inter = InterEditDataset(root_dir=c['inter_edit_root'], split='train', cache_dir=c['cache_dir'], **common)
-    magic = MagicBrushDataset(root_dir=c['magicbrush_root'], split='train',
-                             cache_dir=Path(c['cache_dir']) / 'magicbrush', **common)
-    ds = MixedEditDataset([inter, magic], ['Inter-Edit', 'MagicBrush'],
-                          [1 - c['magicbrush_probability'], c['magicbrush_probability']],
-                          rank=acc.process_index, seed=c['seed'])
+    from src.training_data import build_inter_edit_training_data, write_data_mixture_info
+    ds, info = build_inter_edit_training_data(local_stream_args(c), tokenizer,
+                                             acc.process_index, acc.num_processes)
+    write_data_mixture_info(c['output_dir'], info)
     # Readers already shard by rank. Do not Accelerator.prepare this loader.
     loader = torch.utils.data.DataLoader(ds, batch_size=c['micro_batch'], num_workers=0)
     return ReplayStream(loader, c['seed'] + acc.process_index, consumed)
@@ -223,7 +216,13 @@ def preview(acc, out, step, ema, vq, source, original, cond, batch, r_init=1.0):
     b, h, w = tokens.shape
     decoded = vq.decode(tokens.flatten(), force_not_quantize=True,
                         shape=(b, h, w, vq.config.latent_channels)).sample.float().clamp(0, 1)
-    save_image(decoded, out / 'validation' / f'step-{step}-rank{acc.process_index}.png')
+    image_path = out / 'validation' / f'step-{step}-rank{acc.process_index}.png'
+    save_image(decoded, image_path)
+    from src.dimo.visualization import annotated_preview
+    context = read_json(out / 'validation' / f'fixed-probe-rank{acc.process_index}.json')
+    annotated_preview(out / 'validation' / f'fixed-source-rank{acc.process_index}.png',
+                      image_path, context['instruction'],
+                      out / 'validation' / f'step-{step}-rank{acc.process_index}-annotated.png', step)
 
 
 def main():
@@ -241,7 +240,8 @@ def main():
     validate_config(c)
     from src.dimo.infer import validate_base_components
     validate_base_components(c['base_model_dir'])
-    c['source_metadata'] = source_metadata()
+    current_source_metadata = source_metadata()
+    c['source_metadata'] = current_source_metadata
     initialize_local_cuda_device()
     acc = Accelerator(mixed_precision=c['mixed_precision'], dynamo_backend='no', kwargs_handlers=[
         DistributedDataParallelKwargs(find_unused_parameters=True),
@@ -281,7 +281,16 @@ def main():
     torch.cuda.reset_peak_memory_stats()
     if resume:
         state = read_progress(resume, acc.process_index)
+        # Keep the run's original code fingerprint as its checkpoint identity.
+        # Record the implementation used by this resumed phase separately.
+        c['source_metadata'] = state['config']['source_metadata']
         validate_progress(state, c, acc.num_processes)
+        collective_call(acc, lambda: write_json(out / 'logs' /
+            f'resume-step{state["global_step"]}-source.json', dict(
+                checkpoint=str(resume), original_source_metadata=c['source_metadata'],
+                resumed_source_metadata=current_source_metadata,
+                save_every=c['save_every'],
+                checkpoints_total_limit=c['checkpoints_total_limit'])), main_only=True)
         origin = read_json(out / 'teacher_origin.json')
         for name, digest in origin['pinned_teacher_checksums'].items():
             if sha256(out / 'teacher' / name) != digest:
@@ -353,6 +362,31 @@ def main():
     last_batch = {}
     probe_path=out/'validation'/f'fixed-probe-rank{acc.process_index}.pt'
     probe=torch.load(probe_path,map_location=acc.device,weights_only=True) if resume and probe_path.is_file() else None
+    context_path=out/'validation'/f'fixed-probe-rank{acc.process_index}.json'
+    source_path=out/'validation'/f'fixed-source-rank{acc.process_index}.png'
+    def save_probe_context(batch):
+        from torchvision.utils import save_image
+        instruction=batch['instruction'][0]
+        if not isinstance(instruction,str) or not instruction.strip():
+            raise ValueError('Fixed DiMO probe has no edit instruction')
+        save_image(batch['reference_image'][0],source_path)
+        write_json(context_path,dict(instruction=instruction,
+                    sample_id=str(batch['sample_id'][0]),
+                    sample_key=str(batch.get('sample_key',[batch['sample_id'][0]])[0])))
+    if resume and probe is not None and (not context_path.is_file() or not source_path.is_file()):
+        # The step-2000 probe predates source/instruction sidecars. Recreate its
+        # first rank-local sample without advancing the restored training stream.
+        first_batch=next(dataset_stream(c,tokenizer,acc,0))
+        from src.v2_utils import prepare_cond_token
+        from src.mask_utils import resize_edit_mask_to_tokens
+        with torch.no_grad():
+            restored_source=prepare_cond_token(None,first_batch['reference_image'].to(acc.device),vq)
+            restored_source=restored_source.reshape_as(probe['source'])
+            restored_mask=resize_edit_mask_to_tokens(first_batch['edit_mask'].to(acc.device),
+                                                     probe['original'].shape[-2:]).reshape_as(probe['original'])
+        if not torch.equal(restored_source,probe['source']) or not torch.equal(restored_mask,probe['original']):
+            raise ValueError('Replayed first sample does not match the saved fixed DiMO probe')
+        save_probe_context(first_batch)
     def batch_fn():
         nonlocal probe
         batch, prepared = prepare_next_batch(acc, stream, encoders, vq, empty, teacher)
@@ -362,6 +396,7 @@ def main():
             probe=dict(source=source.detach(),original=original.detach(),
                        cond={k:v.detach() if torch.is_tensor(v) else v for k,v in cond.items()})
             torch.save(probe,probe_path)
+            save_probe_context(batch)
         return prepared
     import time
     while step < c['max_steps']:

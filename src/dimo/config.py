@@ -16,7 +16,8 @@ HISTORICAL_DEFAULTS = dict(FREEZE_DEFAULTS, noise_emb_perturb=0.0, lr_scheduler=
 PATH_ENV = {'SFT_RUN_DIR':'sft_run_dir', 'DIMO_TEACHER_DIR':'teacher_transformer_dir',
             'BASE_MODEL_DIR':'base_model_dir', 'DIMO_OUTPUT_DIR':'output_dir',
             'DIMO_MANIFEST':'data_manifest', 'INTER_EDIT_ROOT':'inter_edit_root',
-            'MAGICBRUSH_ROOT':'magicbrush_root'}
+            'MAGICBRUSH_ROOT':'magicbrush_root', 'MASKEDIT_ROOT':'maskedit_root',
+            'INTER_EDIT_TRANSLATIONS_DIR':'inter_edit_translations_dir'}
 
 
 def resolve_config(path, environ=None):
@@ -28,7 +29,8 @@ def resolve_config(path, environ=None):
     for env,key in PATH_ENV.items():
         if env in environ: c[key]=environ[env]
     for key in ('base_model_dir','output_dir','sft_run_dir','teacher_transformer_dir',
-                'data_manifest','inter_edit_root','magicbrush_root','cache_dir'):
+                'data_manifest','inter_edit_root','magicbrush_root','maskedit_root',
+                'inter_edit_translations_dir','cache_dir'):
         if c.get(key): c[key]=str(Path(c[key]).expanduser().resolve())
     if c.get('data_roots'):
         c['data_roots']={k:str(Path(v).expanduser().resolve()) if v else '' for k,v in c['data_roots'].items()}
@@ -95,6 +97,9 @@ def validate_config(c):
             if not path:raise ValueError('Each data root must be explicitly configured')
             if not Path(path).is_dir():raise FileNotFoundError(path)
     elif c.get('data_mode')=='local_stream':
+        from src.dimo.data import local_stream_args
+        from src.maskedit_dataset import MASKEDIT_CONFIGS
+        from src.training_data import edit_data_probabilities
         if c.get('language') not in ('en','all','zh'):raise ValueError('Explicit stream language required')
         probability=c.get('magicbrush_probability')
         if isinstance(probability,bool) or not isinstance(probability,(float,int)) or not 0<probability<1:
@@ -103,6 +108,21 @@ def validate_config(c):
             if not c.get(key):raise ValueError(f'Local stream requires {key}')
         for key in ('inter_edit_root','magicbrush_root'):
             if not Path(c[key]).is_dir():raise FileNotFoundError(c[key])
+        data_args=local_stream_args(c)
+        edit_data_probabilities(bool(data_args.magicbrush_data_dir), data_args.magicbrush_probability,
+                                bool(data_args.maskedit_data_dir), data_args.maskedit_probability)
+        for key in ('maskedit_root','inter_edit_translations_dir'):
+            if c.get(key) and not Path(c[key]).is_dir():raise FileNotFoundError(c[key])
+        if type(data_args.exclude_inter_edit_text_editing) is not bool:
+            raise ValueError('exclude_inter_edit_text_editing must be boolean')
+        if (not isinstance(data_args.maskedit_configs, (list, tuple)) or not data_args.maskedit_configs
+                or any(name not in MASKEDIT_CONFIGS for name in data_args.maskedit_configs)):
+            raise ValueError('maskedit_configs must select non-Chinese MaskEdit configurations')
+        if data_args.maskedit_prompt_field not in ('edit_instruction','prompt'):
+            raise ValueError('Invalid maskedit_prompt_field')
+        for key in ('magicbrush_read_batch_size','maskedit_read_batch_size'):
+            if type(getattr(data_args,key)) is not int or getattr(data_args,key)<1:
+                raise ValueError(f'{key} must be a positive integer')
     else:raise ValueError('Explicit data_manifest or data_mode=local_stream required; no fallback')
     if type(c.get('checkpoints_total_limit',5)) is not int or c.get('checkpoints_total_limit',5)<1:
         raise ValueError('checkpoints_total_limit must be positive')

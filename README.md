@@ -167,6 +167,8 @@ Inter-Edit/
 
 [InterEditDataset](src/inter_edit_dataset.py) streams metadata and reads images directly from tar archives. It builds member-offset indexes under `data/inter_edit_tar_index`; no extraction or custom train/test split is required. `--dataset_cache_dir` changes the cache location.
 
+`scripts/train_en_causal.sh` and `scripts/train_en_causal_resume.sh` enable `--exclude_inter_edit_text_editing` by default. This training-only filter excludes text-editing categories plus explicit English/Chinese text-related instructions, including text edits labelled `Local`, `Add` or `Remove`. It checks both the original and translated prompt for text/words/lettering, writing, fonts, inscriptions and similar explicit phrases before loading images or tokenizing. Generic object references such as a sign, book, texture or writing desk are retained. This is a metadata/keyword filter; implicit requests without recognizable wording may remain. Dataset lengths and cached counts reflect the filter, and `data_mixture/rank_XXXX.json` records the policy, its version and the excluded count after language selection. Original data and translation files are unchanged. Validation and benchmark test samples retain their existing selection. Append `--no-exclude_inter_edit_text_editing` to either launcher to retain text-related training examples.
+
 To translate Chinese training instructions into a separate English JSONL with Qwen3.5-9B and vLLM, use [scripts/translate_inter_edit.sh](scripts/translate_inter_edit.sh). It defaults to eight independent GPU replicas and saves each batch for automatic resume. Use the prepared vLLM environment; the wrapper does not install dependencies or change Torch. `PYTHON_BIN=/path/to/python` selects its interpreter, `--model` accepts a local model directory, and `--tp-size` controls GPUs per replica.
 
 #### Translate the Chinese test instructions
@@ -221,7 +223,7 @@ data/magicbrush/data/
 └── dev-*.parquet
 ```
 
-Each row contains `img_id`, `turn_index`, `instruction`, `source_img`, `target_img`, and `mask_img`. [MagicBrushDataset](src/magicbrush_dataset.py) reads bounded PyArrow batches, using each turn's supplied source image, including its edit history. The general mixed launcher samples **80% English Inter-Edit / 20% MagicBrush per example**. The no-dilation resume launcher samples **70% Inter-Edit (original English + translated Chinese) / 20% MagicBrush / 10% MaskEdit-10K**. Streams repeat, and optimizer steps determine run length. Only MagicBrush `train` shards enter training.
+Each row contains `img_id`, `turn_index`, `instruction`, `source_img`, `target_img`, and `mask_img`. [MagicBrushDataset](src/magicbrush_dataset.py) reads bounded PyArrow batches, using each turn's supplied source image, including its edit history. The causal fresh/resume launchers default to **90% Inter-Edit (original English + translated Chinese) / 5% MagicBrush / 5% MaskEdit-10K per example**. Streams repeat, and optimizer steps determine run length. Only MagicBrush `train` shards enter training.
 
 All training samples use **white = edit, black = preserve** masks, accepting both 0/1 and 0/255 encodings. Source, target, and mask receive aligned resizing/cropping; crops are adjusted to retain a localized edit. Mask downsampling preserves thin regions. Empty masks are excluded and logged under the dataset cache's `empty_masks/train/` directories; MagicBrush also excludes missing masks. Data is sharded across ranks/workers, while the original dataset files remain unchanged.
 
@@ -245,8 +247,8 @@ All shell training launchers live in `scripts/`; the Python implementation and Y
 | `train_en.sh` | English Inter-Edit | `editmgt_sparse_inter_edit_en` |
 | `train_en_cache.sh` | English Inter-Edit + cache conditioning | `editmgt_sparse_inter_edit_en_cache` |
 | `train_en_cache_magicbrush.sh` | English Inter-Edit / MagicBrush mixture + cache conditioning; corrected alpha masks, pure cosine, normalized time, 10% text dropout | `editmgt_sparse_inter_edit_en_cache_magicbrush_maskfix` |
-| `train_en_cache_magicbrush_no_dilation.sh` | Corrected alpha masks; fresh initialization from original EditMGT; fixed halo=0 and no halo supervision | `editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix` |
-| `train_en_cache_magicbrush_no_dilation_resume.sh` | 70% translated+original English Inter-Edit / 20% MagicBrush / 10% MaskEdit-10K; restore full checkpoint state; fixed halo=0 | `editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix` |
+| `train_en_causal.sh` | 90% translated+original English Inter-Edit / 5% MagicBrush / 5% MaskEdit-10K; resume latest in its output directory by default, explicit `--fresh_start` for pretrained initialization; fixed halo=0 and no halo supervision | `inter_brush_maskedit_en_no_dilation_mrcache0.8_d0.1_fresh` |
+| `train_en_causal_resume.sh` | 90% translated+original English Inter-Edit / 5% MagicBrush / 5% MaskEdit-10K; restore full checkpoint state; fixed halo=0 | `editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix` |
 
 For example, train the English/cache-conditioned mixture using an existing environment:
 
@@ -264,17 +266,25 @@ SKIP_INSTALL=1 GPU_IDS=0,1 NUM_PROCESSES=2 REPORT_TO=none \
   bash scripts/train_en_cache_magicbrush.sh
 ```
 
-### Fresh no-dilation experiment
+### No-dilation training and resume
 
-Start training from the original local EditMGT pretrained weights, with a new optimizer, scheduler state and global step 0:
+Continue training from the latest checkpoint in the launcher's output directory:
 
 ```bash
 bash scripts/train_en_causal.sh
 ```
 
-This starts fresh fine-tuning of `checkpoint/EditMGT/editmgt`, rather than random initialization of all weights. It keeps the English Inter-Edit / MagicBrush training mixture, cosine sampling, normalized mask-ratio time conditioning, 10% text dropout, complete reference and low-noise text/reference cache policy. Both training and validation fix `sparse_target_halo=0` and disable halo supervision. Corruption, loss and inference remasking use the original VQ edit mask by default, or the bbox-augmented training mask when enabled; active Transformer cells still cover their underlying editable tokens without morphological dilation. Validation directly decodes the composed token grid without RGB compositing.
+The default `--resume_from_checkpoint latest` restores model, optimizer, scheduler, available RNG state and global step from that directory. If there is no checkpoint, training initializes from `checkpoint/EditMGT/editmgt` at step 0; append `--require_resume` to require an existing checkpoint. It uses the 90% Inter-Edit / 5% MagicBrush / 5% MaskEdit-10K mixture, excludes Inter-Edit text-editing training samples, and retains cosine sampling, normalized mask-ratio time conditioning, 10% text dropout, complete reference and low-noise text/reference cache policy. Both training and validation fix `sparse_target_halo=0` and disable halo supervision. Corruption, loss and inference remasking use the original VQ edit mask by default, or the bbox-augmented training mask when enabled; active Transformer cells still cover their underlying editable tokens without morphological dilation. Validation directly decodes the composed token grid without RGB compositing.
 
-The output directory defaults to `runs/inter_brush_maskedit_en_no_dilation_mrcache0.8_d0.1_fresh`. The launcher creates the requested directory if needed and writes directly into it when it already exists, without adding a timestamp suffix. Set `TRAIN_OUTPUT_DIR` to choose another path. `--fresh_start` overrides the inherited automatic resume, starts at global step 0, and rewrites `run_initialization.json` with the initialization source and `edit_mask_decoding=magicbrush_alpha_cutout_v1`. New outputs replace files at the same paths, while other existing files remain in place. Ordinary optimization options such as learning rate and batch size remain configurable; the profile appends its zero-halo and fresh-start settings after user arguments so those cannot accidentally be overridden.
+The output directory defaults to `runs/inter_brush_maskedit_en_no_dilation_mrcache0.8_d0.1_fresh`; its historical name is retained for existing checkpoints. The launcher creates the requested directory if needed and writes directly into it when it already exists, without adding a timestamp suffix. Set `TRAIN_OUTPUT_DIR` to choose another path. Set `RESUME_FROM_CHECKPOINT=/path/to/checkpoint-N` or append `--resume_from_checkpoint /path/to/checkpoint-N` to select a particular checkpoint. Ordinary optimization options such as learning rate and batch size remain configurable; the profile appends its zero-halo settings after user arguments.
+
+To explicitly start at step 0 from the original pretrained weights with a new optimizer and scheduler, use:
+
+```bash
+bash scripts/train_en_causal.sh --fresh_start
+```
+
+`--fresh_start` overrides automatic or explicit checkpoint resume and rewrites `run_initialization.json` with the initialization source and `edit_mask_decoding=magicbrush_alpha_cutout_v1`. New outputs replace files at the same paths, while other existing files remain in place.
 
 After training has saved a checkpoint, reproduce its own English validation cases with:
 
@@ -284,28 +294,28 @@ bash scripts/infer_inter_edit_no_dilation.sh
 
 This selects the highest `checkpoint-N` in the corrected-mask run directory, loads that run's `validation/samples.json`, and uses halo=0. Use `--run-dir /path/to/new-run` for another run or `--checkpoint /path/to/checkpoint-N` for a specific saved step. The entry accepts only zero-halo checkpoints with halo supervision disabled and does not fall back to an older experiment. Outputs default to `outputs/inter_edit_no_dilation_maskfix`. The general benchmark scripts already default to halo=0 and can evaluate these checkpoints normally.
 
-To resume this experiment later, use the general mixed launcher with the same `TRAIN_OUTPUT_DIR` and `--no-supervise_target_halo --resume_from_checkpoint latest`; omit `--fresh_start`. The dedicated fresh launcher always initializes from pretrained weights at step 0.
+To resume this experiment later, rerun `bash scripts/train_en_causal.sh` with the same `TRAIN_OUTPUT_DIR`; omit `--fresh_start`.
 
 To continue the existing `runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation/checkpoint-2600` with corrected masks:
 
 ```bash
-SKIP_INSTALL=1 bash scripts/train_en_cache_magicbrush_no_dilation_resume.sh
+SKIP_INSTALL=1 bash scripts/train_en_causal_resume.sh
 ```
 
 This restores model, optimizer, scheduler and available RNG state from the corrected `_maskfix/checkpoint-6800` run and continues saving into that run directory. It retains the previous checkpoint's training history and uses corrected MagicBrush masks for subsequent batches. `run_initialization.json` records the source checkpoint and starting step. Later invocations prefer the latest checkpoint in the output directory when it is newer than step 6800; set `RESUME_FROM_CHECKPOINT=/path/to/checkpoint-N` to select another source explicitly. `--max_train_steps` is the absolute stopping step, including the restored 6800 steps. The preview launcher above follows this same corrected run directory.
 
-The resume launcher enables completed translations from `data/inter_edit_zh_to_en_qwen35_9b` and the non-Chinese MaskEdit-10K train configurations (`scene`, `infographics_en`) under `data/MaskEdit-10K`. Its default per-example probabilities are 70% Inter-Edit, 20% MagicBrush and 10% MaskEdit. It independently converts each training mask to its filled bounding box with 10% probability (`MASK_BBOX_PROB=0.1`). It defaults to `SKIP_INSTALL=1` to reuse the prepared training environment. Model, optimizer, scheduler and available RNG state continue from the existing latest corrected checkpoint; changing the data pool does not restart the global step.
+The resume launcher enables completed translations from `data/inter_edit_zh_to_en_qwen35_9b` and the non-Chinese MaskEdit-10K train configurations (`scene`, `infographics_en`) under `data/MaskEdit-10K`. Its default per-example probabilities are 90% Inter-Edit, 5% MagicBrush and 5% MaskEdit. It independently converts each training mask to its filled bounding box with 10% probability (`MASK_BBOX_PROB=0.1`). It defaults to `SKIP_INSTALL=1` to reuse the prepared training environment. Model, optimizer, scheduler and available RNG state continue from the existing latest corrected checkpoint; changing the data pool does not restart the global step.
 
 This launcher sets `CONDITION_CACHE_THRESHOLD=0.8` and explicitly enables `--allow_condition_cache_threshold_change_on_resume`, allowing the step-6800 checkpoint's threshold to migrate from 0.3 to 0.8 while restoring its weights, optimizer, scheduler, step and available RNG state. Only the threshold may change; cache-conditioning mode, time conditioning and loss-reduction compatibility checks remain in place. Old checkpoint files are unchanged. Each distinct threshold transition is recorded under `condition_cache_transitions/`. The resumed model needs subsequent updates to adapt to the earlier cache phase. Set `CONDITION_CACHE_THRESHOLD=0.6` or `0.7` before this launcher to select another phase; the same environment variable configures both training and validation.
 
 ```bash
-SKIP_INSTALL=1 bash scripts/train_en_cache_magicbrush_no_dilation_resume.sh
+SKIP_INSTALL=1 bash scripts/train_en_causal_resume.sh
 
-# Optional path/probability overrides; Inter-Edit receives 1 - 0.2 - 0.1.
+# Optional path/probability overrides; Inter-Edit receives 1 - 0.05 - 0.05.
 INTER_EDIT_TRANSLATIONS_DIR=/path/to/completed_translations \
 MASKEDIT_DATA_DIR=/path/to/MaskEdit-10K \
-MAGICBRUSH_PROBABILITY=0.2 MASKEDIT_PROBABILITY=0.1 \
-SKIP_INSTALL=1 bash scripts/train_en_cache_magicbrush_no_dilation_resume.sh
+MAGICBRUSH_PROBABILITY=0.05 MASKEDIT_PROBABILITY=0.05 \
+SKIP_INSTALL=1 bash scripts/train_en_causal_resume.sh
 ```
 
 Equivalent Python options are `--inter_edit_translations_dir`, `--maskedit_data_dir`, `--magicbrush_probability`, and `--maskedit_probability`. An incomplete, limited, stale or mismatched translation release is rejected. Existing Chinese samples receive the translated instruction once; they are not duplicated as separate image pairs. Data provenance and rank-local counts/probabilities are written to `data_mixture/rank_XXXX.json`; earlier configurations are retained in `data_mixture/history/` when the mixture changes. Qualitative validation continues to use the original official Inter-Edit English test cases.
@@ -327,7 +337,9 @@ Settings come from the shell launchers and `train/train.py` arguments. `train/tr
 | Halo / cache transition | 0 cells, no dilation / 0.8 mask fraction | `SPARSE_TARGET_HALO`, `CONDITION_CACHE_THRESHOLD` |
 | Text condition dropout | 0.1 in MagicBrush mixed launchers; 0 in other launchers | `COND_DROPOUT_PROB`, `--cond_dropout_prob` |
 | Training mask → bbox probability | 0.1 in the no-dilation resume launcher; 0 in other launchers | `MASK_BBOX_PROB`, `--mask_bbox_prob` |
-| MagicBrush probability | 0.2, in mixed launchers | `MAGICBRUSH_PROBABILITY` |
+| MagicBrush probability | 0.05, when enabled | `MAGICBRUSH_PROBABILITY`, `--magicbrush_probability` |
+| MaskEdit-10K probability | 0.05, when enabled | `MASKEDIT_PROBABILITY`, `--maskedit_probability` |
+| Inter-Edit text-editing exclusion | Enabled in causal fresh/resume launchers | `--exclude_inter_edit_text_editing`, `--no-exclude_inter_edit_text_editing` |
 | Output directory | Per-launcher directory above | `TRAIN_OUTPUT_DIR` |
 | Resume | Latest checkpoint in that output directory | `--resume_from_checkpoint` |
 | Execution | Eager; compilation disabled | `COMPILE_MODEL=1`, optional `COMPILE_BACKEND` |

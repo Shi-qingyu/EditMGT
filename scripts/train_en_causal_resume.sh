@@ -39,13 +39,15 @@ fi
 
 # Use the existing English launcher directly; keep the mixed-dataset settings
 # here so this entry does not depend on the removed cache/mixed wrappers.
+# Default mixture: 90% Inter-Edit, 5% MagicBrush and 5% MaskEdit-10K.
 exec bash "$PROJECT_ROOT/scripts/train_en.sh" \
     --allow_condition_cache_threshold_change_on_resume \
     --magicbrush_data_dir "${MAGICBRUSH_DATA_DIR:-$PROJECT_ROOT/data/magicbrush}" \
-    --magicbrush_probability "${MAGICBRUSH_PROBABILITY:-0.2}" \
+    --magicbrush_probability "${MAGICBRUSH_PROBABILITY:-0.05}" \
     --inter_edit_translations_dir "${INTER_EDIT_TRANSLATIONS_DIR:-$PROJECT_ROOT/data/inter_edit_zh_to_en_qwen35_9b}" \
     --maskedit_data_dir "${MASKEDIT_DATA_DIR:-$PROJECT_ROOT/data/MaskEdit-10K}" \
-    --maskedit_probability "${MASKEDIT_PROBABILITY:-0.1}" \
+    --maskedit_probability "${MASKEDIT_PROBABILITY:-0.05}" \
+    --exclude_inter_edit_text_editing \
     "$@" \
     --output_dir "$TRAIN_OUTPUT_DIR" \
     --no-fresh_start \

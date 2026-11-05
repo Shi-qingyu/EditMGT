@@ -12,7 +12,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--checkpoint", type=Path,
-        default=PROJECT_ROOT / "runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/checkpoint-7000",
+        default=PROJECT_ROOT / "runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/checkpoint-7800",
         help="Full checkpoint-N directory or Transformer directory; default: the maskfix checkpoint-7000.",
     )
     parser.add_argument("--model-path", default=str(PROJECT_ROOT / "checkpoint/EditMGT"),
@@ -31,8 +31,8 @@ def parse_args(argv=None):
                         help="Filter original instructions without translation; default: en.")
     parser.add_argument("--selection", choices=("first", "random"), default="first",
                         help="First eligible examples, or shuffle metadata shards and rows with --selection-seed.")
-    parser.add_argument("--selection-seed", type=int, default=42)
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--selection-seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=0,
                         help="Generation seed for each case is seed + sample_id.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--bf16", action="store_true", help="Use BF16 instead of FP32.")
@@ -189,7 +189,7 @@ def prepare_cases(args, image_resample=None):
 def main(args):
     transformer_path, checkpoint_name, step = resolve_checkpoint(args.checkpoint)
     if args.output_dir is None:
-        args.output_dir = PROJECT_ROOT / "outputs/inter_edit_train" / checkpoint_name
+        args.output_dir = PROJECT_ROOT / "outputs/inter_edit" / checkpoint_name
         if args.cache_first_step:
             args.output_dir = args.output_dir.with_name(checkpoint_name + "_first_step_cache")
     args.output_dir = args.output_dir.expanduser().resolve()

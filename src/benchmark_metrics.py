@@ -134,10 +134,11 @@ class BenchmarkMetrics:
         return float(F.cosine_similarity(left.float().reshape(1, -1), right.float().reshape(1, -1)).item())
 
     def _alpha_feature(self, image, mask):
-        dtype = next(self.alpha.parameters()).dtype
-        pixels = self.alpha_transform(image).unsqueeze(0).to(self.device, dtype=dtype)
-        alpha = self.alpha_mask_transform(mask.astype(np.uint8) * 255).unsqueeze(0).to(self.device, dtype=dtype)
-        return self.alpha.visual(pixels, alpha)
+        pixels = self.alpha_transform(image).unsqueeze(0).to(self.device)
+        alpha = self.alpha_mask_transform(mask.astype(np.uint8) * 255).unsqueeze(0).to(self.device)
+        # AlphaCLIP mixes FP32 embeddings with FP16 visual convolutions on CUDA.
+        # Its public encoder casts both inputs to the visual convolution dtype.
+        return self.alpha.encode_image(pixels, alpha)
 
     @torch.inference_mode()
     def score(self, prediction, target, source=None, mask=None, caption=None):

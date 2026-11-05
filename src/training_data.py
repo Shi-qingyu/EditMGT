@@ -4,7 +4,7 @@ import json
 import math
 from pathlib import Path
 
-from src.inter_edit_dataset import InterEditDataset
+from src.inter_edit_dataset import INTER_EDIT_TEXT_FILTER_VERSION, InterEditDataset
 from src.magicbrush_dataset import MagicBrushDataset
 from src.maskedit_dataset import MaskEditDataset
 from src.mask_utils import MAGICBRUSH_MASK_DECODING
@@ -32,10 +32,15 @@ def build_inter_edit_training_data(args, tokenizer, rank, world_size):
                   rank=rank, world_size=world_size, seed=args.seed if args.seed is not None else 42)
     inter_edit = InterEditDataset(root_dir=args.instance_data_dir, split=args.dataset_split,
                                  cache_dir=args.dataset_cache_dir, language=args.dataset_language,
-                                 translations_dir=args.inter_edit_translations_dir, **common)
+                                 translations_dir=args.inter_edit_translations_dir,
+                                 exclude_text_editing=getattr(args, "exclude_inter_edit_text_editing", False), **common)
     datasets, names = [inter_edit], ["Inter-Edit"]
     sources = [{"name": "Inter-Edit", "root": str(inter_edit.reader.root.resolve()), "split": args.dataset_split,
-                "sample_count": len(inter_edit), "probability": probabilities["Inter-Edit"]}]
+                "sample_count": len(inter_edit), "probability": probabilities["Inter-Edit"],
+                "exclude_text_editing": inter_edit.exclude_text_editing,
+                "text_editing_filter_version": INTER_EDIT_TEXT_FILTER_VERSION if inter_edit.exclude_text_editing else None,
+                "excluded_text_editing_count": inter_edit.excluded_text_editing_count,
+                "sample_count_before_text_editing_filter": len(inter_edit) + inter_edit.excluded_text_editing_count}]
     if inter_edit.reader.translations is not None:
         overlay = inter_edit.reader.translations
         sources[0].update(translations_dir=str(overlay.root), translation_model=overlay.config.get("model"),
@@ -65,7 +70,7 @@ def build_inter_edit_training_data(args, tokenizer, rank, world_size):
         datasets=datasets, names=names, weights=[probabilities[name] for name in names], rank=rank, seed=common["seed"],
     )
     info = {"rank": rank, "world_size": world_size, "language_filter": args.dataset_language,
-            "count_scope": "rank-local, language-filtered, before empty-mask exclusions",
+            "count_scope": "rank-local, after source-specific metadata filters, before empty-mask exclusions",
             "resume_from_checkpoint": args.resume_from_checkpoint, "sources": sources,
             "validation": {"dataset": "Inter-Edit", "split": "test", "language_filter": args.dataset_language}}
     return dataset, info

@@ -81,6 +81,7 @@ def prepare_fresh_training_output(args):
         "supervise_target_halo": args.supervise_target_halo,
         "timestep_sampling": args.timestep_sampling,
         "mask_bbox_prob": args.mask_bbox_prob,
+        "exclude_inter_edit_text_editing": getattr(args, "exclude_inter_edit_text_editing", False),
     }
     if args.magicbrush_data_dir:
         initialization["magicbrush_data_dir"] = str(Path(args.magicbrush_data_dir).resolve())
@@ -103,6 +104,7 @@ def record_resumed_training_output(args, checkpoint, global_step):
         "supervise_target_halo": args.supervise_target_halo,
         "timestep_sampling": args.timestep_sampling,
         "mask_bbox_prob": args.mask_bbox_prob,
+        "exclude_inter_edit_text_editing": getattr(args, "exclude_inter_edit_text_editing", False),
     }
     if args.magicbrush_data_dir:
         initialization["magicbrush_data_dir"] = str(Path(args.magicbrush_data_dir).resolve())
@@ -367,18 +369,23 @@ def parse_args():
         help="Completed Qwen translation output; replace Chinese train prompts before language filtering/tokenization.",
     )
     parser.add_argument(
+        "--exclude_inter_edit_text_editing", action=argparse.BooleanOptionalAction, default=False,
+        help="Exclude Inter-Edit train text-editing categories and explicit English/Chinese text-related instructions, "
+             "checking both original and translated prompts before image reads. Does not filter validation/test cases.",
+    )
+    parser.add_argument(
         "--magicbrush_data_dir", type=str, default=None,
         help="Optional local MagicBrush release to mix with Inter-Edit; only train-*.parquet is used.",
     )
     parser.add_argument(
-        "--magicbrush_probability", type=float, default=0.2,
+        "--magicbrush_probability", type=float, default=0.05,
         help="Per-example MagicBrush probability; Inter-Edit receives 1 - MagicBrush - MaskEdit.",
     )
     parser.add_argument("--magicbrush_read_batch_size", type=int, default=4,
                         help="Bound the number of image-containing parquet rows materialized together per worker.")
     parser.add_argument("--maskedit_data_dir", type=str, default=None,
                         help="Optional MaskEdit-10K train data; exclude Chinese content and instructions containing Han characters.")
-    parser.add_argument("--maskedit_probability", type=float, default=0.1)
+    parser.add_argument("--maskedit_probability", type=float, default=0.05)
     parser.add_argument("--maskedit_configs", nargs="+", choices=MASKEDIT_CONFIGS, default=list(MASKEDIT_CONFIGS),
                         help="Non-Chinese training configurations; infographics_cn is excluded.")
     parser.add_argument("--maskedit_prompt_field", choices=("edit_instruction", "prompt"), default="edit_instruction")
@@ -399,6 +406,10 @@ def parse_args():
         "--time_conditioning", choices=["legacy", "mask_ratio"], default="legacy",
         help="Use normalized mask ratio for matching train/infer time embeddings, or preserve old-checkpoint time units.",
     )
+    parser.add_argument("--disable_micro_conditions", action="store_true",
+                        help="Ablation: zero the encoded five-value micro-conditioning features.")
+    parser.add_argument("--disable_token_type_rope", action="store_true",
+                        help="Ablation: share RoPE type coordinates across text, reference and target branches.")
     parser.add_argument(
         "--mask_loss_reduction", choices=["token", "sample"], default="token",
         help="Average CE over all supervised tokens (legacy) or normalize each example before averaging.",
@@ -485,6 +496,10 @@ def parse_args():
         parser.error("--sparse_target_halo must be non-negative")
     if args.dataset_language != "all" and args.instance_dataset != "InterEditDataset":
         parser.error("--dataset_language is supported only for InterEditDataset")
+    if args.exclude_inter_edit_text_editing and (
+        args.instance_dataset != "InterEditDataset" or args.dataset_split != "train"
+    ):
+        parser.error("--exclude_inter_edit_text_editing requires InterEditDataset and --dataset_split train")
     if (args.magicbrush_data_dir or args.maskedit_data_dir or args.inter_edit_translations_dir) and (
         args.instance_dataset != "InterEditDataset" or args.dataset_split != "train" or not args.train_edit_model
     ):
@@ -700,6 +715,10 @@ def main(args):
 
     if args.sparse_target:
         model.enable_sparse_target(halo=args.sparse_target_halo, supervise_halo=args.supervise_target_halo)
+    if args.disable_token_type_rope:
+        model.register_to_config(token_type_rope=False)
+    if args.disable_micro_conditions:
+        model.register_to_config(use_micro_conditions=False)
     if args.cache_conditioning:
         model.enable_condition_cache_training(threshold=args.condition_cache_threshold)
     model.set_time_conditioning(args.time_conditioning)
@@ -1015,6 +1034,9 @@ def main(args):
                     accelerator.process_index,
                     [(source["name"], source["sample_count"], source["probability"])
                      for source in mixture_info["sources"]])
+        logger.info("Inter-Edit text-editing exclusion: enabled=%s, excluded=%s metadata samples on rank %s",
+                    mixture_info["sources"][0]["exclude_text_editing"],
+                    mixture_info["sources"][0]["excluded_text_editing_count"], accelerator.process_index)
     elif args.instance_dataset == 'HuggingFaceDataset':
         # Inter-Edit and local parquet readers do not depend on HF datasets.
         from datasets import load_dataset

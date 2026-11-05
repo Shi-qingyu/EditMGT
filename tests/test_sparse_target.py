@@ -51,6 +51,51 @@ def inputs(batch=2, downsample=True):
     )
 
 
+def test_micro_condition_ablation_ignores_all_five_values():
+    model = tiny_model().eval()
+    args = inputs(batch=1)
+    changed = dict(args, micro_conds=args["micro_conds"] + 25)
+    with torch.no_grad():
+        enabled_a, enabled_b = model(**args), model(**changed)
+        assert not torch.allclose(enabled_a, enabled_b)
+        model.register_to_config(use_micro_conditions=False)
+        disabled_a, disabled_b = model(**args), model(**changed)
+    torch.testing.assert_close(disabled_a, disabled_b)
+    assert model.config.use_micro_conditions is False
+
+
+def test_sparse_target_can_disable_token_type_rope_without_disabling_sparsity():
+    model = tiny_model().eval()
+    model.enable_sparse_target(halo=0)
+    args = inputs(batch=1)
+    seen = []
+    original = model.pos_embed.forward
+
+    def capture(ids):
+        seen.append(ids[:, 0].unique().tolist())
+        return original(ids)
+
+    with torch.no_grad(), patch.object(model.pos_embed, "forward", side_effect=capture):
+        model(**args)
+        assert seen == [[0, 2], [1]]
+        seen.clear()
+        model.register_to_config(token_type_rope=False)
+        model(**args)
+    assert seen == [[0], [0]]
+    assert model.config.sparse_target is True
+
+
+def test_ablation_flags_survive_checkpoint_reload(tmp_path):
+    model = tiny_model().eval()
+    model.enable_sparse_target(halo=0)
+    model.register_to_config(token_type_rope=False, use_micro_conditions=False)
+    model.save_pretrained(tmp_path, safe_serialization=True)
+    loaded = Transformer2DModel.from_pretrained(tmp_path)
+    assert loaded.config.sparse_target is True
+    assert loaded.config.token_type_rope is False
+    assert loaded.config.use_micro_conditions is False
+
+
 def test_layout_projects_any_edit_and_keeps_per_sample_active_sets():
     mask = torch.zeros(3, 6, 8, dtype=torch.bool)
     mask[0, 1, 3] = True

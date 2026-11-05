@@ -10,7 +10,7 @@ from PIL import Image
 from torch.utils.data import DataLoader
 
 from src.dataset_utils import process_edit_sample
-from src.inter_edit_dataset import InterEditDataset, InterEditReader, TarAssetReader
+from src.inter_edit_dataset import InterEditDataset, InterEditReader, TarAssetReader, is_inter_edit_text_editing
 
 
 def png(color, size=(8, 8), mask=False):
@@ -139,6 +139,70 @@ def test_dataset_exposes_training_fields_and_keeps_source_target_mask_aligned(in
     torch.testing.assert_close(sample["reference_image"][0], torch.full((8, 8), 10 / 255))
 
 
+@pytest.mark.parametrize("row,expected", [
+    ({"edit_type": "Text Editing", "instruction": "Make it blue."}, True),
+    ({"edit_type": "text_editing", "instruction": "Make it blue."}, True),
+    ({"edit_type": "Local", "instruction": "change the graffiti text from 'Siss' to 'Candy'"}, True),
+    ({"edit_type": "Remove", "instruction": "remove the large letter S, clocks, and glass shards"}, True),
+    ({"edit_type": "Add", "instruction": "添加一把带有等待字样的伞"}, True),
+    ({"edit_type": "Remove", "instruction": "擦除所有文字和图形"}, True),
+    ({"edit_type": "Local", "instruction": "Make it blue.", "instruction_original": "将文字改为蓝色"}, True),
+    ({"edit_type": "Local", "instruction": 'Write "Hello" on the sign.'}, True),
+    ({"edit_type": "Add", "instruction": "Add a writing desk."}, False),
+    ({"edit_type": "Add", "instruction": "添加一张写字台"}, False),
+    ({"edit_type": "Remove", "instruction": "Remove the traffic sign."}, False),
+    ({"edit_type": "Add", "instruction": "Add a letter on the desk."}, False),
+    ({"edit_type": "Texture", "instruction": "Make it textured leather."}, False),
+])
+def test_text_editing_filter_distinguishes_text_requests_from_object_edits(row, expected):
+    assert is_inter_edit_text_editing(row) is expected
+
+
+def test_train_text_filter_counts_and_cache_match_stream_without_reading_excluded_assets(inter_edit):
+    root, cache = inter_edit
+    instructions = [
+        "Change the text to blue.", "Make it blue.",
+        "Add the words Hello World.", "擦除所有文字和图形",
+        "Add a writing desk.", "Make it red.",
+        "Add a traffic sign.", "Use textured leather.",
+    ]
+    reader = InterEditReader(root, cache_dir=cache)
+    for path in reader.metadata_files:
+        rows = reader.read_metadata(path)
+        for row in rows:
+            index = row["sample_id"]
+            row["instruction"] = instructions[index]
+            row["edit_type"] = "Text Editing" if index == 1 else "Local"
+            if index < 4:
+                row["source_archive"] = "must_not_read.tar"
+        with gzip.open(path, "wt", encoding="utf-8") as handle:
+            handle.writelines(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+
+    # Unfiltered and filtered counts must occupy different cache entries.
+    path = reader.metadata_files[0]
+    assert reader.count_metadata_languages(path)["all"] == 2
+    counts = reader.count_metadata_languages(path, exclude_text_editing=True)
+    assert counts["all"] == 0 and counts["excluded_text_editing_all"] == 2
+    assert reader.count_metadata_languages(path)["all"] == 2
+    dataset = InterEditDataset(root, cache_dir=cache, exclude_text_editing=True,
+                              shuffle=False, repeat=False, size=8)
+    assert len(dataset) == 4 and dataset.excluded_text_editing_count == 4
+    assert [sample["sample_id"] for sample in dataset] == [4, 5, 6, 7]
+    assert len(InterEditDataset(root, cache_dir=cache)) == 8
+    with patch.object(InterEditReader, "read_metadata", side_effect=AssertionError("Counts should be cached")):
+        assert len(InterEditDataset(root, cache_dir=cache, exclude_text_editing=True)) == 4
+
+    # Official test rows are retained even when they are explicit text edits.
+    test_path = root / "test/metadata.json"
+    test_rows = json.loads(test_path.read_text())
+    test_rows[0].update(edit_type="Text Editing", instruction='Write "Hello" on the sign.')
+    test_path.write_text(json.dumps(test_rows))
+    validation = InterEditDataset(root, split="test", cache_dir=cache, shuffle=False, repeat=False, size=8)
+    assert len(validation) == 1 and next(iter(validation))["instruction"] == test_rows[0]["instruction"]
+    with pytest.raises(ValueError, match="training split"):
+        InterEditDataset(root, split="test", cache_dir=cache, exclude_text_editing=True)
+
+
 def test_inter_edit_crop_keeps_localized_edit_when_random_crop_misses():
     source = Image.new("RGB", (32, 8), (20, 30, 40))
     mask = Image.new("L", (32, 8), 0)
@@ -222,6 +286,28 @@ def test_translations_enter_english_training_before_filtering_and_tokenization(i
     assert original.read_metadata(path)[0]["instruction"] == "添加物体 0"
     # Official test prompts remain untouched.
     assert next(InterEditReader(root, "test").iter_samples(count=1))[3]["instruction"] == "Add an object."
+
+
+def test_train_text_filter_checks_original_and_translated_instructions(inter_edit, tmp_path):
+    root, cache = inter_edit
+    path = InterEditReader(root).metadata_files[0]
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        rows = [json.loads(line) for line in handle if line.strip()]
+    rows[0]["instruction"] = "添加文字"
+    for row in rows:
+        row["source_archive"] = "must_not_read.tar"
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        handle.writelines(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+    directory = write_test_translations(root, tmp_path / "translated")
+    sidecar = directory / "shards" / path.name.removesuffix(".gz")
+    translations = [json.loads(line) for line in sidecar.read_text().splitlines()]
+    # Sample 0 is recognized only in the original; sample 1 only in the overlay.
+    translations[1]["instruction_en"] = 'Write "Hello" on the sign.'
+    sidecar.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in translations))
+    dataset = InterEditDataset(root, cache_dir=cache, translations_dir=directory, language="en",
+                              exclude_text_editing=True, shuffle=False, repeat=False, size=8)
+    assert len(dataset) == 6 and dataset.excluded_text_editing_count == 2
+    assert [sample["sample_id"] for sample in dataset] == list(range(2, 8))
 
 
 @pytest.mark.parametrize("failure", ["missing", "wrong_id", "wrong_original", "duplicate"])

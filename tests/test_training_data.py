@@ -163,12 +163,18 @@ def test_training_cli_accepts_resume_data_options_and_rejects_invalid_total(monk
     assert args.allow_condition_cache_threshold_change_on_resume
     assert args.condition_cache_threshold == 0.8
     assert args.validation_reference_kv_cache_threshold == 0.8
-    assert list(edit_data_probabilities(True, args.magicbrush_probability, True, args.maskedit_probability).values()) == [0.7, 0.2, 0.1]
+    assert list(edit_data_probabilities(True, args.magicbrush_probability, True, args.maskedit_probability).values()) == pytest.approx([0.9, 0.05, 0.05])
+    assert not args.exclude_inter_edit_text_editing
+    monkeypatch.setattr(sys, "argv", command + ["--exclude_inter_edit_text_editing"])
+    assert namespace["parse_args"]().exclude_inter_edit_text_editing
+    monkeypatch.setattr(sys, "argv", command + ["--exclude_inter_edit_text_editing",
+                                             "--no-exclude_inter_edit_text_editing"])
+    assert not namespace["parse_args"]().exclude_inter_edit_text_editing
     monkeypatch.setattr(sys, "argv", command + ["--allow_condition_cache_threshold_change_on_resume",
                                              "--condition_cache_threshold", "0.8"])
     migrated = namespace["parse_args"]()
     assert migrated.allow_condition_cache_threshold_change_on_resume and migrated.condition_cache_threshold == 0.8
-    monkeypatch.setattr(sys, "argv", command + ["--maskedit_probability", "0.9"])
+    monkeypatch.setattr(sys, "argv", command + ["--maskedit_probability", "0.96"])
     with pytest.raises(SystemExit) as exc:
         namespace["parse_args"]()
     assert exc.value.code == 2

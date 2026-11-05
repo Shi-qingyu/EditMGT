@@ -22,7 +22,53 @@ Select **one** Teacher source:
 
 Set `base_model_dir` / `BASE_MODEL_DIR` independently. It must contain explicit local `editmgt`, CLIP `text_encoder`/`tokenizer`, `llm_encoder` (including tokenizer), `vqvae`, `scheduler`. Missing local Gemma assets fail before upstream's remote fallback. Full strict keys/shapes, finite weights, codebook and mask-token compatibility are required. Unmerged adapter checkpoints are rejected; `lora_part_enable` is explicit and remains true for the reviewed SFT path.
 
-For a fixed manifest, set `data_manifest`, its SHA256, `data_roots`, `expected_dataset_counts` and `verify_asset_hashes`. Relative asset locators must remain under their dataset root; every source/target/mask locator and English prompt is checked, and decoded masks/checksums are checked when samples are consumed. Historical 50K composition: Inter-Edit 33237, MagicBrush 8763, MaskEdit 8000; not a 1:1:1 mixture. The length must divide the requested world size. There is no manifest-to-stream fallback. Alternatively explicitly select `data_mode=local_stream`, configure both local training roots, cache directory, language and MagicBrush probability. Data readers retain the upstream preprocessing and rank sharding. No independent train/test overlap audit is performed; do not claim leakage was excluded.
+For a fixed manifest, set `data_manifest`, its SHA256, `data_roots`, `expected_dataset_counts` and `verify_asset_hashes`. Relative asset locators must remain under their dataset root; every source/target/mask locator and English prompt is checked, and decoded masks/checksums are checked when samples are consumed. Historical 50K composition: Inter-Edit 33237, MagicBrush 8763, MaskEdit 8000; not a 1:1:1 mixture. The length must divide the requested world size. There is no manifest-to-stream fallback. Alternatively explicitly select `data_mode=local_stream`, configure local training roots, cache directory, language and sampling probabilities. Local streams use SFT's `build_inter_edit_training_data`, including its mask decoding, translation overlays, language/text filters and rank sharding. Per-rank source counts, probabilities and filtering metadata are written under `data_mixture/`. No independent train/test overlap audit is performed; do not claim leakage was excluded.
+
+### Inter-Edit / MagicBrush / MaskEdit preset
+
+`configs/dimo/region_dimo_inter_brush_maskedit.json` matches the latest
+`scripts/train_en_causal.sh` data settings: **90% Inter-Edit, 5% MagicBrush,
+5% MaskEdit-10K**, sampled per example. Inter-Edit uses the completed English
+translation overlay and excludes text-editing training instructions. MaskEdit
+uses the non-Chinese `scene` and `infographics_en` train configurations.
+Student and Auxiliary consume separate batches from this same mixture.
+
+The Teacher is fixed to
+`runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/checkpoint-8000`,
+with base components from `checkpoint/EditMGT`. Its saved cache threshold (0.3)
+is retained. The v3 algorithm remains unchanged: Teacher CFG=6, Student/Auxiliary
+CFG=1, runtime Halo=1 with supervision, embedding noise=0.3, BF16, micro-batch=1,
+gradient accumulation=8 and a 100-update LR warmup. A new run writes to
+`runs/region_dimo_v3_inter_brush_maskedit`; the SFT optimizer is never resumed.
+
+```bash
+# Read-only config/base/strict Teacher checks; does not start GPU training.
+bash scripts/dimo/train_inter_brush_maskedit.sh --check-only
+
+# Start training, including the initial 20-update preflight and reload checks.
+bash scripts/dimo/train_inter_brush_maskedit.sh
+
+# Or stop after the 20-update GPU preflight, then continue its full state.
+bash scripts/dimo/train_inter_brush_maskedit.sh --stop-after-preflight
+bash scripts/dimo/train_inter_brush_maskedit.sh --resume latest
+```
+
+The wrapper resolves paths from the project root and respects `DIMO_CONFIG`,
+`DIMO_PYTHON`, `CUDA_VISIBLE_DEVICES`, `GPU_IDS` and `NUM_PROCESSES`.
+Use `DIMO_OUTPUT_DIR`, `DIMO_TEACHER_DIR`, `BASE_MODEL_DIR`, `INTER_EDIT_ROOT`,
+`MAGICBRUSH_ROOT`, `MASKEDIT_ROOT` or `INTER_EDIT_TRANSLATIONS_DIR` to override
+paths. For other ratios or hyperparameters, copy the preset and select it with
+`DIMO_CONFIG`. Keep the same config and world size when resuming.
+
+Integration validation (2026-10-30, Python 3.10, PyTorch 2.11.0+cu130):
+the pinned checkpoint-8000 passed strict Teacher/base loading; each real dataset
+yielded a decoded source image with a nonempty mask under an eight-rank data
+layout. The targeted compatibility suite had 209 passes and one existing main
+failure: `test_analysis_sample_adapter_uses_official_test_split_without_parquet_manifest`
+imports the absent `scripts.test_zero_shot`. A two-H20 tiny-model BF16 smoke
+passed DDP updates, gradient isolation, full checkpoint reload and exact
+continuation of model, optimizer, RNG and data state. Full-size distillation
+and its memory preflight have not been run.
 
 ## Launch and bounded preflight
 

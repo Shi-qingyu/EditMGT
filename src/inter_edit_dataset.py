@@ -25,8 +25,35 @@ DEFAULT_INTER_EDIT_ROOT = "/mnt/geminihzceph/public/data/Inter-Edit"
 DEFAULT_INTER_EDIT_CACHE = Path(__file__).resolve().parents[1] / "data" / "inter_edit_tar_index"
 logger = logging.getLogger(__name__)
 INTER_EDIT_LANGUAGES = ("all", "en", "zh")
+INTER_EDIT_TEXT_FILTER_VERSION = "text-editing-v1"
 _HAN_CHARACTERS = re.compile("[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U000323af]")
 _ENGLISH_LETTERS = re.compile("[A-Za-z]")
+_TEXT_EDIT_TYPES = frozenset({"text", "textedit", "textediting", "文字编辑", "文本编辑"})
+_TEXT_EDIT_INSTRUCTION = re.compile(
+    r"\b(?:texts?|lettering|words?|inscriptions?|captions?|subtitles?|slogans?|fonts?|"
+    r"typography|typographic|calligraphy|handwriting|watermarks?|letters)\b"
+    r"|\b(?:write|rewrite|reword|rephrase|typeset|spell)\b"
+    r"|\bletter\s+(?:[\"'“‘][^\"'”’]+[\"'”’]|[a-z](?![a-z]))"
+    r"|\b(?:reads?|says?)\s+[\"'“‘]"
+    r"|文字|文本|字样|字体|字母|汉字|标语|字幕|题字|题词|书法|手写|水印|拼写|写上|写着|写有|写成|书写",
+    re.IGNORECASE,
+)
+
+
+def is_inter_edit_text_editing(row):
+    """Recognize text categories and explicit en/zh text-related instructions.
+
+    Train rows can label text edits as Local/Add/Remove. Check both the original
+    and translated instruction; a generic mention of a sign or book is not
+    sufficient to exclude an otherwise ordinary object edit.
+    """
+    edit_type = re.sub(r"[\s_-]+", "", str(row.get("edit_type", "")).casefold())
+    if edit_type in _TEXT_EDIT_TYPES:
+        return True
+    return any(
+        isinstance(instruction, str) and _TEXT_EDIT_INSTRUCTION.search(instruction) is not None
+        for instruction in (row.get("instruction"), row.get("instruction_original"))
+    )
 
 
 def inter_edit_prompt_language(row):
@@ -193,7 +220,7 @@ class InterEditReader:
             return self.translations.apply(path, indexed_rows)
         return [row for _, row in indexed_rows]
 
-    def count_metadata_languages(self, path):
+    def count_metadata_languages(self, path, exclude_text_editing=False):
         """Cache per-shard counts so filtered __len__ needs no image reads.
 
         Counts are shared across ranks/runs and invalidated when metadata changes.
@@ -204,6 +231,8 @@ class InterEditReader:
         identity = f"prompt-language-v1:{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
         if self.translations is not None:
             identity += ":" + self.translations.cache_identity(path)
+        if exclude_text_editing:
+            identity += ":exclude-" + INTER_EDIT_TEXT_FILTER_VERSION
         digest = hashlib.sha256(identity.encode()).hexdigest()[:24]
         cache_root = (Path(self.cache_dir) if self.cache_dir is not None
                       else DEFAULT_INTER_EDIT_CACHE) / "language_counts"
@@ -214,8 +243,20 @@ class InterEditReader:
             if cache_path.is_file():
                 return json.loads(cache_path.read_text(encoding="utf-8"))
             rows = self.read_metadata(path)
+            excluded_counts = Counter()
+            if exclude_text_editing:
+                kept_rows = []
+                for row in rows:
+                    if is_inter_edit_text_editing(row):
+                        excluded_counts[inter_edit_prompt_language(row)] += 1
+                        excluded_counts["all"] += 1
+                    else:
+                        kept_rows.append(row)
+                rows = kept_rows
             counts = Counter(inter_edit_prompt_language(row) for row in rows)
             counts["all"] = len(rows)
+            counts.update({f"excluded_text_editing_{language}": count
+                           for language, count in excluded_counts.items()})
             temporary_path = None
             try:
                 with tempfile.NamedTemporaryFile("w", dir=cache_root, suffix=".tmp", delete=False) as temporary:
@@ -271,23 +312,28 @@ class InterEditDataset(IterableDataset):
 
     The training entry point leaves this loader out of Accelerator.prepare:
     this class already distributes data, and all tensors are moved explicitly.
-    Language filtering happens before asset reads. __len__ reports the selected
-    language's metadata count before empty-mask filtering; training stops by steps.
+    Language and optional text-editing filtering happen before asset reads.
+    __len__ reports the remaining metadata count before empty-mask filtering;
+    training stops by steps.
     """
 
     def __init__(
         self, root_dir=DEFAULT_INTER_EDIT_ROOT, split="train", tokenizer=None,
         size=1024, text_encoder_architecture="CLIP", norm=False,
         rank=0, world_size=1, shuffle=True, repeat=True, cache_dir=None, seed=42,
-        language="all", translations_dir=None,
+        language="all", translations_dir=None, exclude_text_editing=False,
     ):
         super().__init__()
         if world_size < 1 or not 0 <= rank < world_size:
             raise ValueError("Inter-Edit rank must be in [0,world_size)")
         if language not in INTER_EDIT_LANGUAGES:
             raise ValueError(f"Unsupported Inter-Edit language filter: {language!r}")
+        if exclude_text_editing and split != "train":
+            raise ValueError("Text-editing exclusion is supported only for the Inter-Edit training split")
         self.reader = InterEditReader(root_dir, split, cache_dir, translations_dir=translations_dir)
         self.language = language
+        self.exclude_text_editing = bool(exclude_text_editing)
+        self.excluded_text_editing_count = 0
         self.tokenizer, self.size = tokenizer, size
         self.text_encoder_architecture, self.norm = text_encoder_architecture, norm
         self.rank, self.world_size = rank, world_size
@@ -300,17 +346,24 @@ class InterEditDataset(IterableDataset):
             self.num_samples = sum(min(self.reader.samples_per_shard,
                                        self.reader.num_samples - index * self.reader.samples_per_shard)
                                    for index in shard_ids)
-            if language != "all":
-                counts = {path: self.reader.count_metadata_languages(path).get(language, 0)
-                          for path in self.metadata_files}
-                self.metadata_files = [path for path in self.metadata_files if counts[path] > 0]
-                self.num_samples = sum(counts.values())
+            if language != "all" or self.exclude_text_editing:
+                counts = {path: self.reader.count_metadata_languages(
+                    path, exclude_text_editing=self.exclude_text_editing,
+                ) for path in self.metadata_files}
+                self.metadata_files = [path for path in self.metadata_files if counts[path].get(language, 0) > 0]
+                self.num_samples = sum(count.get(language, 0) for count in counts.values())
+                self.excluded_text_editing_count = sum(
+                    count.get(f"excluded_text_editing_{language}", 0) for count in counts.values()
+                )
         else:
             self.metadata_files = self.reader.metadata_files
             self.num_samples = sum(matches_inter_edit_language(row, language)
                                    for row in self.reader.test_rows[rank::world_size])
         if self.num_samples == 0:
-            raise ValueError(f"No Inter-Edit {split} samples match language={language!r} on rank={rank}")
+            raise ValueError(
+                f"No Inter-Edit {split} samples match language={language!r}, "
+                f"exclude_text_editing={self.exclude_text_editing} on rank={rank}"
+            )
 
     def __len__(self):
         return self.num_samples
@@ -369,6 +422,8 @@ class InterEditDataset(IterableDataset):
                         rows = list(rows)
                     if self.language != "all":
                         rows = [row for row in rows if matches_inter_edit_language(row, self.language)]
+                    if self.exclude_text_editing:
+                        rows = [row for row in rows if not is_inter_edit_text_editing(row)]
                     if self.shuffle:
                         rng.shuffle(rows)
                     for row in rows:
@@ -396,7 +451,7 @@ class InterEditDataset(IterableDataset):
                 if not yielded:
                     raise ValueError(
                         f"No valid Inter-Edit samples remain for rank={self.rank}, worker={worker_id}; "
-                        f"language={self.language!r}; "
+                        f"language={self.language!r}; exclude_text_editing={self.exclude_text_editing}; "
                         f"{len(empty_sample_ids)} empty-mask samples were excluded. "
                         "Check the assigned annotation shards instead of repeating an empty stream."
                     )

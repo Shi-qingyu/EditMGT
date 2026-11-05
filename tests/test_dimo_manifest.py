@@ -72,6 +72,8 @@ def test_resume_allows_only_budget_extension():
                     world_size=4, global_step=3125, consumed_batches=50000,
                     microbatches_per_update=16)
     validate_progress(progress, dict(config, max_steps=6250), 4)
+    validate_progress(progress, dict(config, max_steps=6250,
+                                     save_every=500, checkpoints_total_limit=20), 4)
     with pytest.raises(ValueError, match='shorten'):
         validate_progress(progress, dict(config, max_steps=3000), 4)
     with pytest.raises(ValueError, match='identical'):

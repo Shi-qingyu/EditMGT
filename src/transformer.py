@@ -487,17 +487,24 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         connector_type: str = 'none',   # None will not be save
         sparse_target: bool = False,
         sparse_target_halo: int = 0,
-        token_type_rope: bool = False,
+        token_type_rope: Optional[bool] = None,
         cache_conditioning: bool = False,
         condition_cache_threshold: float = 0.8,
         time_conditioning: str = "legacy",
         supervise_target_halo: bool = False,
+        use_micro_conditions: bool = True,
     ):
         super().__init__()
+        # Sparse models constructed directly historically enabled branch type
+        # coordinates. An explicit False is reserved for the ablation.
+        if token_type_rope is None:
+            self.register_to_config(token_type_rope=bool(sparse_target))
         if not 0.0 < condition_cache_threshold <= 1.0:
             raise ValueError("condition_cache_threshold must be in (0,1]")
         if time_conditioning not in ("legacy", "mask_ratio"):
             raise ValueError("time_conditioning must be legacy or mask_ratio")
+        if type(use_micro_conditions) is not bool:
+            raise ValueError("use_micro_conditions must be boolean")
         self.out_channels = in_channels
         self.inner_dim = self.config.num_attention_heads * self.config.attention_head_dim # 64 * 16 = 1024 # 24 * 128 = 3072  # 6 * 128 = 768; 12 * 64 = 768
 
@@ -920,9 +927,14 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
         if cached_condition:
             pooled_projections = condition_kv_cache.pooled_projections
         else:
-            micro_cond_embeds = get_timestep_embedding(
-                micro_conds.flatten(), 256, flip_sin_to_cos=True, downscale_freq_shift=0,
-            ).reshape(hidden_states.shape[0], -1)
+            if self.config.use_micro_conditions:
+                micro_cond_embeds = get_timestep_embedding(
+                    micro_conds.flatten(), 256, flip_sin_to_cos=True, downscale_freq_shift=0,
+                ).reshape(hidden_states.shape[0], -1)
+            else:
+                # Zero the encoded features, not the raw five values: a zero
+                # input still has nonzero sinusoidal cosine features.
+                micro_cond_embeds = pooled_projections.new_zeros((hidden_states.shape[0], 1280))
             pooled_projections = torch.cat([pooled_projections, micro_cond_embeds], dim=1).to(dtype=self.dtype)
             pooled_projections = self.cond_embed(pooled_projections).to(encoder_hidden_states.dtype)
             encoder_hidden_states = self.context_embedder(encoder_hidden_states)
@@ -1018,7 +1030,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginal
             if fixed_condition_temb is not None:
                 reference_temb = torch.where(condition_prefix_mask[:, None], fixed_condition_temb, reference_temb)
 
-        type_rope = self.config.token_type_rope or self.config.sparse_target
+        type_rope = self.config.token_type_rope
         text_length = condition_kv_cache.text_length if cached_condition else encoder_hidden_states.shape[1]
         if not cached_condition:
             txt_ids = prepare_branch_ids(txt_ids, batch_size, text_length, 0 if type_rope else None)

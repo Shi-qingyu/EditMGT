@@ -12,6 +12,12 @@ from src.dimo.origin import sha256
 
 CHECKPOINT_KIND = 'region-dimo-v3'
 UPDATE_RULE = 'student_then_auxiliary_new_batches'
+RESUME_OPERATIONAL_FIELDS = frozenset({'max_steps', 'save_every', 'checkpoints_total_limit'})
+
+
+def trajectory_config(config):
+    """Fields that affect model updates, data order, or checkpoint identity."""
+    return {k: v for k, v in config.items() if k not in RESUME_OPERATIONAL_FIELDS}
 
 
 def microbatches_per_update(config):
@@ -28,8 +34,8 @@ def validate_progress(progress, config, world_size, step=None):
     saved = progress['config']
     # Constant LR has no budget-dependent schedule: extending only max_steps
     # preserves optimizer, data and RNG trajectories. Other changes stay strict.
-    saved_core = {k: v for k, v in saved.items() if k != 'max_steps'}
-    current_core = {k: v for k, v in config.items() if k != 'max_steps'}
+    saved_core = trajectory_config(saved)
+    current_core = trajectory_config(config)
     if saved_core != current_core or progress['world_size'] != world_size:
         raise ValueError('Resume requires identical config, data/batch layout and world size')
     if config.get('max_steps', 0) < saved.get('max_steps', 0):
@@ -151,8 +157,8 @@ def prune_checkpoints(out, config):
         header=json.loads((p/'COMPLETE').read_text())
         if header.get('kind')!=CHECKPOINT_KIND or header.get('output_dir')!=str(out):continue
         # Verify ownership/config including Teacher/source fingerprint before deletion.
-        saved={k:v for k,v in header.get('config',{}).items() if k!='max_steps'}
-        current={k:v for k,v in config.items() if k!='max_steps'}
+        saved=trajectory_config(header.get('config',{}))
+        current=trajectory_config(config)
         if saved!=current:continue
         candidates.append((int(m[1]),p))
     candidates.sort()
