@@ -138,6 +138,14 @@ def test_invalid_mixture_probabilities_are_rejected(magic, mask):
         edit_data_probabilities(True, magic, True, mask)
 
 
+def test_test_en_probability_is_separate_and_cannot_exhaust_train_mixture():
+    probabilities = edit_data_probabilities(True, 0.05, True, 0.05, 0.05)
+    assert probabilities == pytest.approx({"Inter-Edit": 0.85, "Inter-Edit-test-en": 0.05,
+                                           "MagicBrush": 0.05, "MaskEdit-10K": 0.05})
+    with pytest.raises(ValueError):
+        edit_data_probabilities(True, 0.05, True, 0.05, 0.9)
+
+
 def test_training_cli_accepts_resume_data_options_and_rejects_invalid_total(monkeypatch):
     # Exercise the real argument parser without importing CUDA/model dependencies.
     from src.mask_schedule import validate_inference_shift
@@ -170,6 +178,11 @@ def test_training_cli_accepts_resume_data_options_and_rejects_invalid_total(monk
     monkeypatch.setattr(sys, "argv", command + ["--exclude_inter_edit_text_editing",
                                              "--no-exclude_inter_edit_text_editing"])
     assert not namespace["parse_args"]().exclude_inter_edit_text_editing
+    monkeypatch.setattr(sys, "argv", command + ["--inter_edit_test_probability", "0.05"])
+    assert namespace["parse_args"]().inter_edit_test_probability == pytest.approx(0.05)
+    monkeypatch.setattr(sys, "argv", command + ["--inter_edit_test_probability", "-0.1"])
+    with pytest.raises(SystemExit):
+        namespace["parse_args"]()
     monkeypatch.setattr(sys, "argv", command + ["--allow_condition_cache_threshold_change_on_resume",
                                              "--condition_cache_threshold", "0.8"])
     migrated = namespace["parse_args"]()
@@ -221,6 +234,15 @@ def test_three_source_factory_tokenizes_translations_and_collates_real_mixed_bat
             if name == "Inter-Edit":
                 assert instruction.startswith("Add object ")
     assert set(observed) == {"Inter-Edit", "MagicBrush", "MaskEdit-10K"}
+    args.inter_edit_test_probability = 0.05
+    mixed_with_test, test_info = build_inter_edit_training_data(args, Tokenizer(), 0, 1)
+    assert [item["name"] for item in test_info["sources"]] == [
+        "Inter-Edit", "Inter-Edit-test-en", "MagicBrush", "MaskEdit-10K"]
+    assert [item["probability"] for item in test_info["sources"]] == pytest.approx([0.65, 0.05, 0.2, 0.1])
+    assert test_info["sources"][1]["split"] == "test"
+    assert test_info["sources"][1]["exclude_text_editing"] is True
+    assert test_info["validation"]["overlaps_training"] is True
+    assert "Inter-Edit-test-en" in {item["dataset_name"] for item in itertools.islice(mixed_with_test, 300)}
     output = tmp_path / "run"
     write_data_mixture_info(output, {**info, "sources": [{"name": "old-data"}]})
     write_data_mixture_info(output, info)

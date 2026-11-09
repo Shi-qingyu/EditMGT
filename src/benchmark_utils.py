@@ -350,6 +350,13 @@ class InferenceRunner:
     def generate(self, source, mask, instruction, seed):
         args, pipe = self.args, self.pipe
         native_source = source.convert("RGB")
+        if "exif" in native_source.info:
+            try:
+                native_source.getexif()
+            except (SyntaxError, ValueError):
+                # Some released JPEGs contain malformed EXIF. Keep their decoded
+                # pixels while dropping metadata that Pillow cannot parse later.
+                native_source = Image.frombytes("RGB", native_source.size, native_source.tobytes())
         native_size = native_source.size
         source = native_source.resize((args.resolution, args.resolution), Image.Resampling.BILINEAR)
         provided = args.mask_mode == "provided"

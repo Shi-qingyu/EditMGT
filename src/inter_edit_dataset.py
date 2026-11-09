@@ -328,8 +328,6 @@ class InterEditDataset(IterableDataset):
             raise ValueError("Inter-Edit rank must be in [0,world_size)")
         if language not in INTER_EDIT_LANGUAGES:
             raise ValueError(f"Unsupported Inter-Edit language filter: {language!r}")
-        if exclude_text_editing and split != "train":
-            raise ValueError("Text-editing exclusion is supported only for the Inter-Edit training split")
         self.reader = InterEditReader(root_dir, split, cache_dir, translations_dir=translations_dir)
         self.language = language
         self.exclude_text_editing = bool(exclude_text_editing)
@@ -357,8 +355,12 @@ class InterEditDataset(IterableDataset):
                 )
         else:
             self.metadata_files = self.reader.metadata_files
-            self.num_samples = sum(matches_inter_edit_language(row, language)
-                                   for row in self.reader.test_rows[rank::world_size])
+            selected_rows = [row for row in self.reader.test_rows[rank::world_size]
+                             if matches_inter_edit_language(row, language)]
+            self.excluded_text_editing_count = sum(
+                is_inter_edit_text_editing(row) for row in selected_rows
+            ) if self.exclude_text_editing else 0
+            self.num_samples = len(selected_rows) - self.excluded_text_editing_count
         if self.num_samples == 0:
             raise ValueError(
                 f"No Inter-Edit {split} samples match language={language!r}, "

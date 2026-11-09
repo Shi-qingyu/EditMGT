@@ -370,16 +370,19 @@ def parse_args():
     )
     parser.add_argument(
         "--exclude_inter_edit_text_editing", action=argparse.BooleanOptionalAction, default=False,
-        help="Exclude Inter-Edit train text-editing categories and explicit English/Chinese text-related instructions, "
-             "checking both original and translated prompts before image reads. Does not filter validation/test cases.",
+        help="Exclude text-editing categories and explicit English/Chinese text-related instructions from the "
+             "primary Inter-Edit training loader before image reads. Validation remains unfiltered.",
     )
+    parser.add_argument("--inter_edit_test_probability", type=float, default=0.0,
+                        help="Mix filtered English Inter-Edit test samples into training at this probability. "
+                             "These samples no longer provide an independent evaluation set.")
     parser.add_argument(
         "--magicbrush_data_dir", type=str, default=None,
         help="Optional local MagicBrush release to mix with Inter-Edit; only train-*.parquet is used.",
     )
     parser.add_argument(
         "--magicbrush_probability", type=float, default=0.05,
-        help="Per-example MagicBrush probability; Inter-Edit receives 1 - MagicBrush - MaskEdit.",
+        help="Per-example MagicBrush probability; Inter-Edit train receives the remaining probability.",
     )
     parser.add_argument("--magicbrush_read_batch_size", type=int, default=4,
                         help="Bound the number of image-containing parquet rows materialized together per worker.")
@@ -500,13 +503,15 @@ def parse_args():
         args.instance_dataset != "InterEditDataset" or args.dataset_split != "train"
     ):
         parser.error("--exclude_inter_edit_text_editing requires InterEditDataset and --dataset_split train")
-    if (args.magicbrush_data_dir or args.maskedit_data_dir or args.inter_edit_translations_dir) and (
+    if (args.magicbrush_data_dir or args.maskedit_data_dir or args.inter_edit_translations_dir
+            or args.inter_edit_test_probability > 0) and (
         args.instance_dataset != "InterEditDataset" or args.dataset_split != "train" or not args.train_edit_model
     ):
-        parser.error("Translations/MagicBrush/MaskEdit require InterEditDataset, --dataset_split train and --train_edit_model")
+        parser.error("Mixed Inter-Edit data require InterEditDataset, --dataset_split train and --train_edit_model")
     try:
         edit_data_probabilities(bool(args.magicbrush_data_dir), args.magicbrush_probability,
-                                bool(args.maskedit_data_dir), args.maskedit_probability)
+                                bool(args.maskedit_data_dir), args.maskedit_probability,
+                                args.inter_edit_test_probability)
     except ValueError as exc:
         parser.error(str(exc))
     if args.magicbrush_read_batch_size < 1 or args.maskedit_read_batch_size < 1:

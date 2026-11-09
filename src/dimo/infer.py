@@ -4,6 +4,7 @@ from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
+import time
 
 import numpy as np
 from PIL import Image
@@ -11,6 +12,7 @@ import torch
 
 from src.dimo.checkpoint import verify_checkpoint, CHECKPOINT_KIND, UPDATE_RULE
 from src.dimo.core import generate_one_step
+from src.dimo.core import generation_mask
 from src.dimo.origin import load_strict, sha256
 from src.mask_utils import normalize_edit_mask_image, resize_binary_edit_mask
 
@@ -92,7 +94,8 @@ def resolve_halo_profile(profile, halo=None):
 
 class OneStepEditor:
     def __init__(self,model,encoders,tokenizers,vq,scheduler,*,device,precision='no',
-                 resolution=1024,halo=None,r_init=1.0,lora_part_enable=True,noise_emb_perturb=0.0):
+                 resolution=1024,halo=None,r_init=1.0,lora_part_enable=True,noise_emb_perturb=0.0,
+                 num_inference_steps=1,context_cache=False):
         self.device=torch.device(device)
         if self.device.type=='cuda' and not torch.cuda.is_available():raise RuntimeError('Requested CUDA is unavailable')
         self.model=model.eval().requires_grad_(False).to(self.device)
@@ -101,14 +104,61 @@ class OneStepEditor:
             self.model.enable_sparse_target(halo=self.halo_profile['sparse_target_halo'],
                                           supervise_halo=self.halo_profile['supervise_target_halo'])
         self.model._dimo_lora_part_enable=lora_part_enable
-        self.encoders,self.tokenizers,self.vq=encoders,tokenizers,vq
+        self.encoders,self.tokenizers,self.vq,self.scheduler=encoders,tokenizers,vq,scheduler
         for component in [*encoders,vq]:component.eval().requires_grad_(False)
         if vq.config.num_vq_embeddings!=model.config.codebook_size or scheduler.config.mask_token_id!=model.config.vocab_size-1:
             raise ValueError('VQ codebook / mask token differs from checkpoint')
         if type(resolution) is not int or resolution<16 or resolution%16:raise ValueError('Invalid explicit resolution')
         if isinstance(noise_emb_perturb,bool) or not 0<=noise_emb_perturb<1:raise ValueError('Invalid noise_emb_perturb')
+        if type(num_inference_steps) is not int or num_inference_steps not in (1,2,4):
+            raise ValueError('DiMO inference supports 1, 2, or 4 steps')
+        if type(context_cache) is not bool or context_cache != (num_inference_steps > 1):
+            raise ValueError('Context cache must be enabled for 2/4 steps and disabled for 1 step')
+        if num_inference_steps > 1 and (r_init != 1 or not model.config.cache_conditioning):
+            raise ValueError('Multi-step DiMO requires r_init=1 and a cache-conditioned checkpoint')
         self.precision,self.resolution,self.r_init=precision,resolution,r_init
         self.noise_emb_perturb=noise_emb_perturb
+        self.num_inference_steps,self.context_cache=num_inference_steps,context_cache
+
+    def _multi_step_tokens(self,source,original,conditions):
+        """MaskGIT-style iterative refinement with a first-forward context snapshot.
+
+        The first ratio is 1, above the checkpoint's 0.8 trained cache phase.
+        Its context snapshot is therefore explicitly approximate. Every later
+        forward reuses that snapshot; this is the requested 2/4-step cache mode.
+        """
+        from src.reference_cache import ConditionKVCache
+        region=generation_mask(original,self.model)
+        latents=torch.where(region,self.model.config.vocab_size-1,source)
+        self.scheduler.set_timesteps(self.num_inference_steps,device=self.device)
+        cache=ConditionKVCache(allow_early_capture=True)
+        ratios=list(self.scheduler.mask_ratios)
+        try:
+            for index,timestep in enumerate(self.scheduler.timesteps):
+                reuse=cache.ready
+                kwargs=dict(conditions)
+                if reuse:
+                    for key in ('encoder_hidden_states','reference_image_hidden_states',
+                                'txt_ids','reference_image_ids'):
+                        kwargs[key]=None
+                ratio=float(ratios[index])
+                model_output=self.model(hidden_states=latents,
+                    timestep=torch.full((len(source),),ratio,device=self.device),
+                    mask_ratio=ratio,sparse_target=True,
+                    condition_kv_cache=cache,noise_emb_perturb=self.noise_emb_perturb,
+                    **kwargs)
+                latents=self.scheduler.step(model_output,timestep,latents,
+                    edit_mask=region,source_tokens=source).prev_sample
+                if not torch.equal(latents[~region],source[~region]):
+                    raise RuntimeError('Multi-step DiMO changed source-locked tokens')
+            if not cache.ready:
+                raise RuntimeError('DiMO context cache was never populated')
+            return latents,dict(enabled=True,capture_step=0,
+                reuse_steps=list(range(1,self.num_inference_steps)),
+                approximate_early_snapshot=True,allow_early_capture=True,
+                mask_ratios=ratios,cache_layers=cache.num_layers)
+        finally:
+            cache.clear()
 
     @torch.inference_mode()
     def edit(self,source,mask,prompt,*,seed=42,preserve_unmasked_pixels=False):
@@ -117,6 +167,7 @@ class OneStepEditor:
         from src.mask_utils import resize_edit_mask_to_tokens
         from src.pipeline import _prepare_latent_image_ids
         if not isinstance(prompt,str) or not prompt.strip():raise ValueError('Nonempty prompt required')
+        preprocessing_started=time.perf_counter()
         source=source.convert('RGB')
         native_size=source.size
         native_mask=resize_binary_edit_mask(normalize_edit_mask_image(mask),(source.height,source.width))
@@ -124,6 +175,7 @@ class OneStepEditor:
         resized=source.resize(size,Image.Resampling.BILINEAR)
         resized_mask=resize_binary_edit_mask(native_mask,(self.resolution,self.resolution))
         if resized_mask.getbbox() is None:raise ValueError('Empty input mask')
+        preprocessing_seconds=time.perf_counter()-preprocessing_started
         pixels=torch.from_numpy(np.array(resized,dtype=np.float32)/255).permute(2,0,1)[None].to(self.device)
         pixel_mask=torch.from_numpy(np.array(resized_mask)>0)[None,None].to(self.device)
         # Sampling uses Torch RNG, but is local to this request and restores the
@@ -146,25 +198,35 @@ class OneStepEditor:
                 reference_image_hidden_states=tokens,target_edit_mask=original,
                 lora_part_enable=self.model._dimo_lora_part_enable)
             with autocast(self.device,self.precision):
-                generated=generate_one_step(self.model,tokens,original,self.model.config.vocab_size-1,conditions,
-                            r_init=self.r_init,noise_emb_perturb=self.noise_emb_perturb)
+                if self.num_inference_steps==1:
+                    generated=generate_one_step(self.model,tokens,original,self.model.config.vocab_size-1,conditions,
+                                r_init=self.r_init,noise_emb_perturb=self.noise_emb_perturb)
+                    cache_info=dict(enabled=False,reuse_steps=[],approximate_early_snapshot=False)
+                else:
+                    generated,cache_info=self._multi_step_tokens(tokens,original,conditions)
             b,h,w=generated.shape
             decoded=self.vq.decode(generated.flatten(),force_not_quantize=True,
                     shape=(b,h,w,self.vq.config.latent_channels)).sample.float().clamp(0,1)
             image=Image.fromarray((decoded[0].permute(1,2,0).cpu().numpy()*255).round().astype(np.uint8))
+        postprocessing_started=time.perf_counter()
         image=image.resize(native_size,Image.Resampling.BICUBIC)
         # Explicit opt-in only, consistently recorded for comparisons.
         if preserve_unmasked_pixels:image=Image.composite(image,source,native_mask)
-        return image,dict(seed=seed,steps=1,cfg=1.0,halo=self.model.config.sparse_target_halo,
+        postprocessing_seconds=time.perf_counter()-postprocessing_started
+        return image,dict(seed=seed,steps=self.num_inference_steps,cfg=1.0,halo=self.model.config.sparse_target_halo,
             supervise_target_halo=self.model.config.supervise_target_halo,r_init=self.r_init,
             halo_source=self.halo_profile['halo_source'],
             supervise_target_halo_source=self.halo_profile['supervise_target_halo_source'],
             noise_emb_perturb=self.noise_emb_perturb,diagnostic_perturbation=self.noise_emb_perturb!=0,
-            precision=self.precision,resolution=self.resolution,sampling='independent_categorical',
+            precision=self.precision,resolution=self.resolution,
+            sampling='independent_categorical' if self.num_inference_steps==1 else 'maskgit_cosine_refinement',
             output_compositing='original_pixel_mask_at_generation_and_native_resolution' if preserve_unmasked_pixels else 'none',
             preserve_unmasked_pixels=preserve_unmasked_pixels,direct_vq_decode=not preserve_unmasked_pixels,
-            cache='disabled',inference_kv_cache=False,cache_conditioning=self.model.config.cache_conditioning,
+            cache='condition_context_first_step' if self.context_cache else 'disabled',
+            inference_kv_cache=self.context_cache,condition_cache=cache_info,
+            cache_conditioning=self.model.config.cache_conditioning,
             condition_cache_threshold=self.model.config.condition_cache_threshold,
+            outside_pipeline_seconds=preprocessing_seconds+postprocessing_seconds,
             lora_part_enable=self.model._dimo_lora_part_enable)
 
 

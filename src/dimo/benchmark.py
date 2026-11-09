@@ -1,4 +1,4 @@
-"""Region-DiMO backend for unchanged EditMGT MagicBrush/Inter-Edit benchmarks.
+"""Region-DiMO backend for the shared MagicBrush/Inter-Edit/PIE benchmarks.
 
 The adapter binds only the runner/config factory in this command's process.
 Dataset selection, multi-turn dependencies, masks, ordering, GPU partition,
@@ -21,10 +21,14 @@ def protocol_config(args,benchmark=None):
     if args.dimo_backend in ('student','ema'):
         checkpoint=Path(args.checkpoint)
         identity_file=checkpoint/('COMPLETE' if (checkpoint/'COMPLETE').is_file() else 'export.json')
-        config.update(model_protocol='region_dimo_independent_categorical_one_step',
+        cache_enabled=args.num_inference_steps>1
+        config.update(model_protocol=('region_dimo_independent_categorical_one_step' if not cache_enabled
+                                      else 'region_dimo_maskgit_cosine_context_cache'),
             dimo_model=args.dimo_backend,r_init=args.dimo_r_init,noise_emb_perturb=0.0,
-            guidance_scale=1.0,num_inference_steps=1,disable_reference_kv_cache=True,
-            disable_condition_kv_cache=True,cache_protocol='disabled',
+            guidance_scale=1.0,num_inference_steps=args.num_inference_steps,
+            disable_reference_kv_cache=not cache_enabled,
+            disable_condition_kv_cache=not cache_enabled,
+            cache_protocol='first_forward_approximate_context_snapshot' if cache_enabled else 'disabled',
             checkpoint_manifest_sha256=sha256(identity_file))
         identity=json.loads(identity_file.read_text())
         profile_path=checkpoint/'config.json' if (checkpoint/'export.json').is_file() else checkpoint.parent/'teacher/config.json'
@@ -54,14 +58,18 @@ class StudentRunner:
         components=load_components(args.model_path,device,precision)
         self.editor=OneStepEditor(model,*components,device=device,precision=precision,
             resolution=args.resolution,halo=args.sparse_target_halo,r_init=args.dimo_r_init,
-            lora_part_enable=origin['config'].get('lora_part_enable',True))
+            lora_part_enable=origin['config'].get('lora_part_enable',True),
+            num_inference_steps=args.num_inference_steps,context_cache=args.num_inference_steps>1)
         self.metadata=dict(backend=args.dimo_backend,model_origin=origin,torch_version=str(torch.__version__),
             device=str(device),device_name=torch.cuda.get_device_name(device) if device.type=='cuda' else 'CPU',
             precision=precision,warmup_generations_per_process=args.warmup,
-            model_protocol='region_dimo_independent_categorical_one_step',cfg=1,cache='disabled',
+            model_protocol=('region_dimo_independent_categorical_one_step' if args.num_inference_steps==1
+                            else 'region_dimo_maskgit_cosine_context_cache'),cfg=1,
+            steps=args.num_inference_steps,
+            cache='condition_context_first_step' if args.num_inference_steps>1 else 'disabled',
             cache_conditioning=model.config.cache_conditioning,condition_cache_threshold=model.config.condition_cache_threshold,
             **self.editor.halo_profile,
-            benchmark_time_scope='synchronized encoders + source VQ + one categorical Student forward + VQ decode; image resize included')
+            benchmark_time_scope='synchronized pipeline including image-to-tensor, encoders, source VQ, Student forwards and VQ decode; excludes native image resize and mask preparation')
 
     def generate(self,source,mask,instruction,seed):
         device=self.editor.device
@@ -75,7 +83,8 @@ class StudentRunner:
         start=time.perf_counter()
         image,info=forward()
         if device.type=='cuda':torch.cuda.synchronize(device)
-        info.update(inference_seconds=time.perf_counter()-start,execution=self.metadata,
+        elapsed=time.perf_counter()-start-info['outside_pipeline_seconds']
+        info.update(inference_seconds=elapsed,execution=self.metadata,
             peak_allocated_bytes=torch.cuda.max_memory_allocated(device) if device.type=='cuda' else None,
             peak_reserved_bytes=torch.cuda.max_memory_reserved(device) if device.type=='cuda' else None)
         return image,info
@@ -123,7 +132,7 @@ def spawn_workers(args,run,shards,names,worker_dirs,devices,metric_devices):
 
 def parse_args(argv=None):
     p=argparse.ArgumentParser(add_help=False)
-    p.add_argument('--benchmark',choices=['magicbrush','inter_edit'],required=True)
+    p.add_argument('--benchmark',choices=['magicbrush','inter_edit','pie_bench'],required=True)
     p.add_argument('--backend',choices=['student','ema','teacher'],default='student')
     p.add_argument('--r-init',type=float,default=1.0)
     p.add_argument('--sparse-target-halo',type=int,default=None)
@@ -132,6 +141,7 @@ def parse_args(argv=None):
         if own.sparse_target_halo<0:p.error('--sparse-target-halo must be nonnegative')
         remaining.extend(['--sparse-target-halo',str(own.sparse_target_halo)])
     if own.benchmark=='inter_edit':from eval import benchmark_inter_edit as entry
+    elif own.benchmark=='pie_bench':from eval import benchmark_pie_bench as entry
     else:from eval import benchmark_magicbrush as entry
     before=sys.argv
     try:
@@ -142,9 +152,15 @@ def parse_args(argv=None):
     if own.backend!='teacher':
         # Upstream defaults to zero; DiMO must distinguish omission from CLI 0.
         args.sparse_target_halo=own.sparse_target_halo
-        if (args.guidance_scale!=1 or args.num_inference_steps!=1 or args.negative_prompt!=''
-                or args.reference_strength!=1 or args.mask_mode!='provided' or args.vanilla or args.cache_first_step):
-            p.error('Student/EMA require --guidance-scale 1 --num-inference-steps 1, empty negative prompt, provided mask, reference strength 1, full DiMO checkpoint; cache-first-step unsupported')
+        if (args.guidance_scale!=1 or args.num_inference_steps not in (1,2,4) or args.negative_prompt!=''
+                or args.reference_strength!=1 or args.mask_mode!='provided' or args.vanilla
+                or (args.num_inference_steps==1 and args.cache_first_step)
+                or (args.num_inference_steps>1 and (not args.cache_first_step or args.disable_reference_kv_cache
+                    or args.disable_condition_kv_cache or own.r_init!=1))):
+            p.error('Student/EMA require CFG=1, provided mask, reference strength 1; one step disables caches, 2/4 steps require --cache-first-step with caches enabled and r_init=1')
+        if args.num_inference_steps==1:
+            args.disable_reference_kv_cache=True
+            args.disable_condition_kv_cache=True
     return args,entry
 
 

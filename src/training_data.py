@@ -11,8 +11,13 @@ from src.mask_utils import MAGICBRUSH_MASK_DECODING
 from src.mixed_edit_dataset import MixedEditDataset
 
 
-def edit_data_probabilities(magicbrush_enabled, magicbrush_probability, maskedit_enabled, maskedit_probability):
+def edit_data_probabilities(magicbrush_enabled, magicbrush_probability, maskedit_enabled, maskedit_probability,
+                            inter_edit_test_probability=0.0):
     probabilities = {"Inter-Edit": 1.0}
+    if not math.isfinite(inter_edit_test_probability) or not 0 <= inter_edit_test_probability < 1:
+        raise ValueError("Inter-Edit test/en probability must be finite and in [0,1)")
+    if inter_edit_test_probability:
+        probabilities["Inter-Edit-test-en"] = inter_edit_test_probability
     for name, enabled, probability in (("MagicBrush", magicbrush_enabled, magicbrush_probability),
                                        ("MaskEdit-10K", maskedit_enabled, maskedit_probability)):
         if not math.isfinite(probability) or not 0 <= probability < 1 or (enabled and probability == 0):
@@ -21,13 +26,14 @@ def edit_data_probabilities(magicbrush_enabled, magicbrush_probability, maskedit
             probabilities[name] = probability
     probabilities["Inter-Edit"] = 1.0 - math.fsum(value for name, value in probabilities.items() if name != "Inter-Edit")
     if probabilities["Inter-Edit"] <= 0:
-        raise ValueError("MagicBrush + MaskEdit probabilities must sum to less than 1")
+        raise ValueError("Inter-Edit test/en + MagicBrush + MaskEdit probabilities must sum to less than 1")
     return probabilities
 
 
 def build_inter_edit_training_data(args, tokenizer, rank, world_size):
     probabilities = edit_data_probabilities(bool(args.magicbrush_data_dir), args.magicbrush_probability,
-                                          bool(args.maskedit_data_dir), args.maskedit_probability)
+                                          bool(args.maskedit_data_dir), args.maskedit_probability,
+                                          getattr(args, "inter_edit_test_probability", 0.0))
     common = dict(tokenizer=tokenizer, size=args.resolution, text_encoder_architecture=args.text_encoder_architecture,
                   rank=rank, world_size=world_size, seed=args.seed if args.seed is not None else 42)
     inter_edit = InterEditDataset(root_dir=args.instance_data_dir, split=args.dataset_split,
@@ -45,6 +51,18 @@ def build_inter_edit_training_data(args, tokenizer, rank, world_size):
         overlay = inter_edit.reader.translations
         sources[0].update(translations_dir=str(overlay.root), translation_model=overlay.config.get("model"),
                           translated_prompt_count_global=overlay.summary["translated"])
+    if "Inter-Edit-test-en" in probabilities:
+        test_en = InterEditDataset(root_dir=args.instance_data_dir, split="test", language="en",
+                                   translations_dir=None, cache_dir=args.dataset_cache_dir,
+                                   exclude_text_editing=True, **common)
+        datasets.append(test_en)
+        names.append("Inter-Edit-test-en")
+        sources.append({"name": "Inter-Edit-test-en", "root": str(test_en.reader.root.resolve()),
+                        "split": "test", "language_filter": "en", "sample_count": len(test_en),
+                        "probability": probabilities["Inter-Edit-test-en"], "exclude_text_editing": True,
+                        "text_editing_filter_version": INTER_EDIT_TEXT_FILTER_VERSION,
+                        "excluded_text_editing_count": test_en.excluded_text_editing_count,
+                        "sample_count_before_text_editing_filter": len(test_en) + test_en.excluded_text_editing_count})
     if args.magicbrush_data_dir:
         magicbrush = MagicBrushDataset(root_dir=args.magicbrush_data_dir, split="train", language=args.dataset_language,
                                       cache_dir=Path(args.dataset_cache_dir) / "magicbrush" if args.dataset_cache_dir else None,
@@ -72,7 +90,8 @@ def build_inter_edit_training_data(args, tokenizer, rank, world_size):
     info = {"rank": rank, "world_size": world_size, "language_filter": args.dataset_language,
             "count_scope": "rank-local, after source-specific metadata filters, before empty-mask exclusions",
             "resume_from_checkpoint": args.resume_from_checkpoint, "sources": sources,
-            "validation": {"dataset": "Inter-Edit", "split": "test", "language_filter": args.dataset_language}}
+            "validation": {"dataset": "Inter-Edit", "split": "test", "language_filter": args.dataset_language,
+                           "overlaps_training": "Inter-Edit-test-en" in probabilities}}
     return dataset, info
 
 

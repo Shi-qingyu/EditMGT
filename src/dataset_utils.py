@@ -13,9 +13,25 @@ from torch.utils.data import IterableDataset
 import pyarrow.fs as fs
 import io
 import json
+import logging
 from src.mask_utils import normalize_edit_mask_image, resize_binary_edit_mask
 
 EDIT_MASK_KEYS = ("edit_mask", "mask", "mask_image", "editing_mask", "mask_png")
+logger = logging.getLogger(__name__)
+
+
+def safe_exif_transpose(image):
+    """Apply valid EXIF orientation and keep decoded pixels if EXIF is malformed."""
+    try:
+        return exif_transpose(image)
+    except (SyntaxError, ValueError) as error:
+        if "exif" not in image.info:
+            raise
+        clean = image.copy()
+        clean.info.pop("exif", None)
+        clean._exif = None
+        logger.warning("Ignoring malformed image EXIF metadata: %s", error)
+        return exif_transpose(clean)
 
 
 def _decode_image_value(value):
@@ -46,8 +62,8 @@ def process_edit_sample(target_image, source_image, edit_mask, size, norm=False,
 
     Returned ``edit_mask`` is float [1,H,W], with 1 denoting the region to edit.
     """
-    target_image = exif_transpose(target_image).convert("RGB")
-    source_image = exif_transpose(source_image).convert("RGB")
+    target_image = safe_exif_transpose(target_image).convert("RGB")
+    source_image = safe_exif_transpose(source_image).convert("RGB")
     edit_mask = normalize_edit_mask_image(edit_mask)
     orig_height, orig_width = target_image.height, target_image.width
 
@@ -209,7 +225,7 @@ def encode_prompt(text_encoder, input_ids, text_encoder_architecture='CLIP'):
 
 
 def process_image(image, size, norm=False):
-    image = exif_transpose(image)
+    image = safe_exif_transpose(image)
 
     if not image.mode == "RGB":
         image = image.convert("RGB")

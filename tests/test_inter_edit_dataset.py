@@ -9,7 +9,7 @@ import torch
 from PIL import Image
 from torch.utils.data import DataLoader
 
-from src.dataset_utils import process_edit_sample
+from src.dataset_utils import process_edit_sample, process_image, safe_exif_transpose
 from src.inter_edit_dataset import InterEditDataset, InterEditReader, TarAssetReader, is_inter_edit_text_editing
 
 
@@ -199,8 +199,29 @@ def test_train_text_filter_counts_and_cache_match_stream_without_reading_exclude
     test_path.write_text(json.dumps(test_rows))
     validation = InterEditDataset(root, split="test", cache_dir=cache, shuffle=False, repeat=False, size=8)
     assert len(validation) == 1 and next(iter(validation))["instruction"] == test_rows[0]["instruction"]
-    with pytest.raises(ValueError, match="training split"):
+    with pytest.raises(ValueError, match="No Inter-Edit test samples"):
         InterEditDataset(root, split="test", cache_dir=cache, exclude_text_editing=True)
+
+
+def test_official_test_en_training_filter_keeps_only_non_text_rows_across_ranks(inter_edit):
+    root, cache = inter_edit
+    path = root / "test/metadata.json"
+    original = json.loads(path.read_text())[0]
+    rows = [dict(original, index=index, instruction=instruction, edit_type=edit_type)
+            for index, instruction, edit_type in (
+                (0, "Add an object.", "Add"),
+                (1, "Add an object.", "Text Editing"),
+                (2, 'Write "Hello" on the sign.', "Add"),
+                (3, "Remove the bag.", "Remove"))]
+    path.write_text(json.dumps(rows))
+    observed = []
+    for rank in range(2):
+        dataset = InterEditDataset(root, split="test", language="en", cache_dir=cache,
+                                   exclude_text_editing=True, rank=rank, world_size=2,
+                                   shuffle=False, repeat=False, size=8)
+        assert len(dataset) == dataset.excluded_text_editing_count == 1
+        observed.extend(int(sample["sample_id"]) for sample in dataset)
+    assert sorted(observed) == [0, 3]
 
 
 def test_inter_edit_crop_keeps_localized_edit_when_random_crop_misses():
@@ -212,6 +233,25 @@ def test_inter_edit_crop_keeps_localized_edit_when_random_crop_misses():
     assert sample["edit_mask"].any()
     assert torch.equal(sample["image"], sample["reference_image"])
     assert sample["micro_conds"][3] >= 21
+
+
+def test_malformed_exif_keeps_decoded_pixels_and_valid_orientation_still_applies():
+    bad_exif = b"Exif\x00\x00I\x01\x00\x00\x00\x00\x00\x00\x0b\x00"
+    source = Image.new("RGB", (8, 8), (10, 20, 30))
+    target = Image.new("RGB", (8, 8), (40, 50, 60))
+    mask = Image.new("L", (8, 8), 255)
+    expected = process_edit_sample(target, source, mask, 8)
+    source.info["exif"] = target.info["exif"] = bad_exif
+    actual = process_edit_sample(target, source, mask, 8)
+    torch.testing.assert_close(actual["image"], expected["image"])
+    torch.testing.assert_close(actual["reference_image"], expected["reference_image"])
+    torch.testing.assert_close(process_image(source, 8)["image"], expected["reference_image"])
+
+    oriented = Image.new("RGB", (2, 3))
+    exif = Image.Exif()
+    exif[274] = 6
+    oriented.info["exif"] = exif.tobytes()
+    assert safe_exif_transpose(oriented).size == (3, 2)
 
 
 def test_analysis_sample_adapter_uses_official_test_split_without_parquet_manifest(inter_edit):
