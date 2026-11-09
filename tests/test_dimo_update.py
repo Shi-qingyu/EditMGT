@@ -31,6 +31,81 @@ def test_bf16_sparse_distillation_forward_backward(case):
     training.assert_gradients(c.models['auxiliary'], 'Auxiliary', False)
 
 
+def cbc_config(**overrides):
+    config = dict(enabled=True, core_weight=1.0, boundary_weight=2.0,
+                  evidence_weight=0.5, boundary_sigma=1.0, core_margin=1.0,
+                  weighted_pseudo_mask=True, evidence_chunk_size=3)
+    config.update(overrides)
+    return config
+
+
+def test_signed_distance_and_core_boundary_context_weights():
+    original = torch.zeros(1, 5, 5, dtype=torch.bool)
+    original[:, 1:4, 1:4] = True
+    region = torch.ones_like(original)
+    distance = core.signed_mask_distance(original, region)
+    assert distance[0, 2, 2] == 1.5
+    assert distance[0, 1, 1] == 0.5
+    assert distance[0, 0, 0] == -0.5
+    evidence = torch.zeros_like(distance)
+    evidence[0, 1, 1] = 1
+    weights = core.region_weight_map(original, region, cbc_config(), evidence, distance)
+    torch.testing.assert_close(weights[region].mean(), torch.tensor(1.0))
+    assert weights[0, 2, 2] > weights[0, 2, 1]
+    assert weights[0, 1, 1] > weights[0, 0, 0]
+    assert weights[~region].numel() == 0
+
+
+def test_weighted_pseudo_mask_preserves_exact_count_and_uses_weights():
+    region = torch.ones(2, 1, 4, dtype=torch.bool)
+    ratio = torch.tensor([0.5, 0.25])
+    weights = torch.tensor([[[1., 1., 0., 0.]], [[0., 0., 3., 0.]]])
+    q = core.pseudo_mask(region, ratio, weights)
+    assert torch.equal(q.flatten(1).sum(1), torch.tensor([2, 1]))
+    assert torch.equal(q[0], torch.tensor([[True, True, False, False]]))
+    assert torch.equal(q[1], torch.tensor([[False, False, True, False]]))
+    with pytest.raises(ValueError, match='positive for enough'):
+        core.pseudo_mask(region, torch.tensor([0.75, 0.5]), weights)
+
+
+def test_teacher_edit_evidence_is_normalized_js_and_chunk_invariant():
+    conditional = torch.tensor([[[[20., -20., -20., -20.], [1., 2., 3., 4.]]]])
+    unconditional = torch.tensor([[[[-20., 20., -20., -20.], [1., 2., 3., 4.]]]])
+    chunked = core.teacher_edit_evidence(conditional, unconditional, chunk_size=1)
+    whole = core.teacher_edit_evidence(conditional, unconditional, chunk_size=16)
+    torch.testing.assert_close(chunked, whole, rtol=1e-6, atol=1e-6)
+    assert chunked[0, 0, 0] > 0.999
+    assert chunked[0, 0, 1] < 1e-6
+
+
+def test_region_weighted_distillation_is_finite_and_gradient_isolated(case):
+    c = case
+    source, original, region, cond, empty = c.batch_fn()
+    loss, payload = core.distillation_losses(
+        c.teacher, c.models['student'], c.models['auxiliary'], source, original, region,
+        31, cond, empty, torch.full((len(source),), 0.7), region_weighting=cbc_config())
+    assert torch.isfinite(loss)
+    assert torch.equal(payload[2].flatten(1).sum(1),
+                       (region.flatten(1).sum(1) * 0.7).round().long().clamp_min(1))
+    loss.backward()
+    training.assert_gradients(c.models['student'], 'Student', True)
+    training.assert_gradients(c.teacher, 'Teacher', False)
+    training.assert_gradients(c.models['auxiliary'], 'Auxiliary', False)
+
+
+def test_region_weighted_full_student_auxiliary_update(case):
+    c = case
+    c.config['region_weighting'] = cbc_config()
+    before_student = state_digest(c.models['student'].state_dict())
+    before_auxiliary = state_digest(c.models['auxiliary'].state_dict())
+    losses = training.run_update(c.acc, c.teacher, c.models, c.optimizers, c.schedulers,
+                                 c.batch_fn, c.sampler, c.config, True)
+    assert all(torch.isfinite(loss) for loss in losses['student'])
+    assert all(torch.isfinite(loss) for round_ in losses['auxiliary'] for loss in round_)
+    assert state_digest(c.models['student'].state_dict()) != before_student
+    assert state_digest(c.models['auxiliary'].state_dict()) != before_auxiliary
+
+
 @pytest.mark.parametrize('warmup', [False, True])
 def test_budget_extension_restores_full_state_and_exact_next_update(case, tmp_path, warmup):
     c = case

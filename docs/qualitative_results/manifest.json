@@ -1,0 +1,256 @@
+{
+  "samples": [
+    {
+      "order": 1,
+      "name": "01_add_sample_01378",
+      "sample_key": "sample_01378",
+      "edit_type": "Add",
+      "instruction": "Add a red gemstone.",
+      "source": "01_add_sample_01378/source.png",
+      "mask": "01_add_sample_01378/mask.png",
+      "source_mask_overlay": "01_add_sample_01378/source_mask_overlay.png",
+      "edited": "01_add_sample_01378/edited.png",
+      "instruction_file": "01_add_sample_01378/instruction.txt",
+      "mask_ratio": 0.02802472453641494,
+      "metrics": {
+        "S_global_LPIPS": 0.056921668350696564,
+        "S_in_AlphaCLIP": 0.9842099547386169,
+        "S_out_AlphaCLIP": 0.9800499677658081,
+        "BSS_Laplacian": 4.5436793169474825
+      },
+      "model": "DiMO EMA-4000, 1 step",
+      "benchmark": "Inter-Edit test/en"
+    },
+    {
+      "order": 2,
+      "name": "02_add_sample_02255",
+      "sample_key": "sample_02255",
+      "edit_type": "Add",
+      "instruction": "Insert a crescent moon with a subtle glow.",
+      "source": "02_add_sample_02255/source.png",
+      "mask": "02_add_sample_02255/mask.png",
+      "source_mask_overlay": "02_add_sample_02255/source_mask_overlay.png",
+      "edited": "02_add_sample_02255/edited.png",
+      "instruction_file": "02_add_sample_02255/instruction.txt",
+      "mask_ratio": 0.01557760601629413,
+      "metrics": {
+        "S_global_LPIPS": 0.0889141783118248,
+        "S_in_AlphaCLIP": 0.989270806312561,
+        "S_out_AlphaCLIP": 0.9892071485519409,
+        "BSS_Laplacian": 0.32318043563055454
+      },
+      "model": "DiMO EMA-4000, 1 step",
+      "benchmark": "Inter-Edit test/en"
+    },
+    {
+      "order": 3,
+      "name": "03_add_sample_05554",
+      "sample_key": "sample_05554",
+      "edit_type": "Add",
+      "instruction": "Add a silver ring, keep gloves black.",
+      "source": "03_add_sample_05554/source.png",
+      "mask": "03_add_sample_05554/mask.png",
+      "source_mask_overlay": "03_add_sample_05554/source_mask_overlay.png",
+      "edited": "03_add_sample_05554/edited.png",
+      "instruction_file": "03_add_sample_05554/instruction.txt",
+      "mask_ratio": 0.011048403953536982,
+      "metrics": {
+        "S_global_LPIPS": 0.04855051636695862,
+        "S_in_AlphaCLIP": 0.9779361486434937,
+        "S_out_AlphaCLIP": 0.9911168813705444,
+        "BSS_Laplacian": 97.08328528677012
+      },
+      "model": "DiMO EMA-4000, 1 step",
+      "benchmark": "Inter-Edit test/en"
+    },
+    {
+      "order": 4,
+      "name": "04_local_sample_00997",
+      "sample_key": "sample_00997",
+      "edit_type": "Local",
+      "instruction": "Replace the red bells with gold ones.",
+      "source": "04_local_sample_00997/source.png",
+      "mask": "04_local_sample_00997/mask.png",
+      "source_mask_overlay": "04_local_sample_00997/source_mask_overlay.png",
+      "edited": "04_local_sample_00997/edited.png",
+      "instruction_file": "04_local_sample_00997/instruction.txt",
+      "mask_ratio": 0.1386178355286579,
+      "metrics": {
+        "S_global_LPIPS": 0.05106300115585327,
+        "S_in_AlphaCLIP": 0.9935690760612488,
+        "S_out_AlphaCLIP": 0.9920708537101746,
+        "BSS_Laplacian": 6.380893388233286
+      },
+      "model": "DiMO EMA-4000, 1 step",
+      "benchmark": "Inter-Edit test/en"
+    },
+    {
+      "order": 5,
+      "name": "05_local_sample_05750",
+      "sample_key": "sample_05750",
+      "edit_type": "Local",
+      "instruction": "Replace the bottom orange with a green apple, maintaining the leaves attached.",
+      "source": "05_local_sample_05750/source.png",
+      "mask": "05_local_sample_05750/mask.png",
+      "source_mask_overlay": "05_local_sample_05750/source_mask_overlay.png",
+      "edited": "05_local_sample_05750/edited.png",
+      "instruction_file": "05_local_sample_05750/instruction.txt",
+      "mask_ratio": 0.03418209736536507,
+      "metrics": {
+        "S_global_LPIPS": 0.06697925925254822,
+        "S_in_AlphaCLIP": 0.995664656162262,
+        "S_out_AlphaCLIP": 0.9892755150794983,
+        "BSS_Laplacian": 10.406566005913117
+      },
+      "model": "DiMO EMA-4000, 1 step",
+      "benchmark": "Inter-Edit test/en"
+    },
+    {
+      "order": 6,
+      "name": "06_local_sample_03770",
+      "sample_key": "sample_03770",
+      "edit_type": "Local",
+      "instruction": "Replace the white candles with red candles.",
+      "source": "06_local_sample_03770/source.png",
+      "mask": "06_local_sample_03770/mask.png",
+      "source_mask_overlay": "06_local_sample_03770/source_mask_overlay.png",
+      "edited": "06_local_sample_03770/edited.png",
+      "instruction_file": "06_local_sample_03770/instruction.txt",
+      "mask_ratio": 0.1075448989868164,
+      "metrics": {
+        "S_global_LPIPS": 0.08218394964933395,
+        "S_in_AlphaCLIP": 0.9946815967559814,
+        "S_out_AlphaCLIP": 0.9905421137809753,
+        "BSS_Laplacian": 1.9332831610093812
+      },
+      "model": "DiMO EMA-4000, 1 step",
+      "benchmark": "Inter-Edit test/en"
+    },
+    {
+      "order": 7,
+      "name": "07_remove_sample_05437",
+      "sample_key": "sample_05437",
+      "edit_type": "Remove",
+      "instruction": "Remove the strap.",
+      "source": "07_remove_sample_05437/source.png",
+      "mask": "07_remove_sample_05437/mask.png",
+      "source_mask_overlay": "07_remove_sample_05437/source_mask_overlay.png",
+      "edited": "07_remove_sample_05437/edited.png",
+      "instruction_file": "07_remove_sample_05437/instruction.txt",
+      "mask_ratio": 0.0498064464767288,
+      "metrics": {
+        "S_global_LPIPS": 0.017408842220902443,
+        "S_in_AlphaCLIP": 0.9956636428833008,
+        "S_out_AlphaCLIP": 0.994212806224823,
+        "BSS_Laplacian": 31.745195606528625
+      },
+      "model": "DiMO EMA-4000, 1 step",
+      "benchmark": "Inter-Edit test/en"
+    },
+    {
+      "order": 8,
+      "name": "08_remove_sample_02850",
+      "sample_key": "sample_02850",
+      "edit_type": "Remove",
+      "instruction": "Remove the Apple logo.",
+      "source": "08_remove_sample_02850/source.png",
+      "mask": "08_remove_sample_02850/mask.png",
+      "source_mask_overlay": "08_remove_sample_02850/source_mask_overlay.png",
+      "edited": "08_remove_sample_02850/edited.png",
+      "instruction_file": "08_remove_sample_02850/instruction.txt",
+      "mask_ratio": 0.013308333333333333,
+      "metrics": {
+        "S_global_LPIPS": 0.007248932961374521,
+        "S_in_AlphaCLIP": 0.9987921714782715,
+        "S_out_AlphaCLIP": 0.9838806390762329,
+        "BSS_Laplacian": 0.4154894900016326
+      },
+      "model": "DiMO EMA-4000, 1 step",
+      "benchmark": "Inter-Edit test/en"
+    },
+    {
+      "order": 9,
+      "name": "09_remove_sample_04781",
+      "sample_key": "sample_04781",
+      "edit_type": "Remove",
+      "instruction": "Remove the blue key.",
+      "source": "09_remove_sample_04781/source.png",
+      "mask": "09_remove_sample_04781/mask.png",
+      "source_mask_overlay": "09_remove_sample_04781/source_mask_overlay.png",
+      "edited": "09_remove_sample_04781/edited.png",
+      "instruction_file": "09_remove_sample_04781/instruction.txt",
+      "mask_ratio": 0.056136,
+      "metrics": {
+        "S_global_LPIPS": 0.03343118727207184,
+        "S_in_AlphaCLIP": 0.9964109063148499,
+        "S_out_AlphaCLIP": 0.9912538528442383,
+        "BSS_Laplacian": 0.027598307223016316
+      },
+      "model": "DiMO EMA-4000, 1 step",
+      "benchmark": "Inter-Edit test/en"
+    },
+    {
+      "order": 10,
+      "name": "10_texture_sample_04934",
+      "sample_key": "sample_04934",
+      "edit_type": "Texture",
+      "instruction": "Make the pots metallic and shiny.",
+      "source": "10_texture_sample_04934/source.png",
+      "mask": "10_texture_sample_04934/mask.png",
+      "source_mask_overlay": "10_texture_sample_04934/source_mask_overlay.png",
+      "edited": "10_texture_sample_04934/edited.png",
+      "instruction_file": "10_texture_sample_04934/instruction.txt",
+      "mask_ratio": 0.137956,
+      "metrics": {
+        "S_global_LPIPS": 0.1267789900302887,
+        "S_in_AlphaCLIP": 0.9914764165878296,
+        "S_out_AlphaCLIP": 0.9858825206756592,
+        "BSS_Laplacian": 27.38437978546426
+      },
+      "model": "DiMO EMA-4000, 1 step",
+      "benchmark": "Inter-Edit test/en"
+    },
+    {
+      "order": 11,
+      "name": "11_texture_sample_04276",
+      "sample_key": "sample_04276",
+      "edit_type": "Texture",
+      "instruction": "Make the sign weathered with scratches and rust marks.",
+      "source": "11_texture_sample_04276/source.png",
+      "mask": "11_texture_sample_04276/mask.png",
+      "source_mask_overlay": "11_texture_sample_04276/source_mask_overlay.png",
+      "edited": "11_texture_sample_04276/edited.png",
+      "instruction_file": "11_texture_sample_04276/instruction.txt",
+      "mask_ratio": 0.0276416015625,
+      "metrics": {
+        "S_global_LPIPS": 0.049103908240795135,
+        "S_in_AlphaCLIP": 0.9645347595214844,
+        "S_out_AlphaCLIP": 0.969536304473877,
+        "BSS_Laplacian": 55.80002638414237
+      },
+      "model": "DiMO EMA-4000, 1 step",
+      "benchmark": "Inter-Edit test/en"
+    },
+    {
+      "order": 12,
+      "name": "12_texture_sample_05414",
+      "sample_key": "sample_05414",
+      "edit_type": "Texture",
+      "instruction": "Replace the curtain texture with lace fabric.",
+      "source": "12_texture_sample_05414/source.png",
+      "mask": "12_texture_sample_05414/mask.png",
+      "source_mask_overlay": "12_texture_sample_05414/source_mask_overlay.png",
+      "edited": "12_texture_sample_05414/edited.png",
+      "instruction_file": "12_texture_sample_05414/instruction.txt",
+      "mask_ratio": 0.19192247658688866,
+      "metrics": {
+        "S_global_LPIPS": 0.1530015468597412,
+        "S_in_AlphaCLIP": 0.9773369431495667,
+        "S_out_AlphaCLIP": 0.9841455817222595,
+        "BSS_Laplacian": 11.185448677020005
+      },
+      "model": "DiMO EMA-4000, 1 step",
+      "benchmark": "Inter-Edit test/en"
+    }
+  ]
+}

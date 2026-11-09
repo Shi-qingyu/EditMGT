@@ -65,6 +65,21 @@ def validate_config(c):
         raise ValueError('Invalid lr_warmup_steps')
     halo=c.get('training_sparse_target_halo',0)
     if type(halo) is not int or halo<0:raise ValueError('Invalid training_sparse_target_halo')
+    region_weighting=c.get('region_weighting')
+    if region_weighting is not None:
+        required={'enabled','core_weight','boundary_weight','evidence_weight','boundary_sigma',
+                  'core_margin','weighted_pseudo_mask','evidence_chunk_size'}
+        if not isinstance(region_weighting,dict) or set(region_weighting)!=required:
+            raise ValueError(f'region_weighting must contain exactly {sorted(required)}')
+        if type(region_weighting['enabled']) is not bool or type(region_weighting['weighted_pseudo_mask']) is not bool:
+            raise ValueError('region_weighting enabled/weighted_pseudo_mask must be boolean')
+        for key in ('core_weight','boundary_weight','evidence_weight','boundary_sigma','core_margin'):
+            value=region_weighting[key]
+            if (isinstance(value,bool) or not isinstance(value,(float,int)) or not math.isfinite(value)
+                    or value<0 or (key in ('boundary_weight','boundary_sigma') and value==0)):
+                raise ValueError(f'Invalid region_weighting.{key}: {value}')
+        if type(region_weighting['evidence_chunk_size']) is not int or region_weighting['evidence_chunk_size']<1:
+            raise ValueError('region_weighting.evidence_chunk_size must be a positive integer')
     if c['dataset_split']!='train' or c['mask_loss_reduction']!='sample' or c['mask_decoding']!=MAGICBRUSH_MASK_DECODING:
         raise ValueError('Require train split, per-sample Q mean and corrected mask decoding')
     if not c.get('expected_profile',{}).get('sparse_target'):raise ValueError('Require explicit sparse Teacher profile')

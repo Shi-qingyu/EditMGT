@@ -11,7 +11,8 @@ from accelerate.utils import set_seed, DistributedDataParallelKwargs, InitProces
 from src.dimo.device import initialize_local_cuda_device
 from src.dimo.origin import select_teacher, load_strict, sha256, weight_files
 from src.dimo.core import (clone_models, generation_mask, predict, distillation_losses,
-                           auxiliary_ce, update_ema, generate_one_step, pseudo_mask)
+                           auxiliary_ce, update_ema, generate_one_step, pseudo_mask,
+                           signed_mask_distance, region_weight_map)
 from src.dimo.data import ReplayStream, local_stream_args
 from src.dimo.checkpoint import (collective_call, save_checkpoint, load_checkpoint,
                                   check_roundtrip, read_progress, verify_checkpoint, state_digest,
@@ -136,7 +137,8 @@ def run_update(acc, teacher, models, optimizers, schedulers, batch_fn, sampler, 
             options = dict(diagnostics=telemetry.observe) if telemetry is not None and (telemetry.diagnostic_due or telemetry.token_due) else {}
             loss_s, payload = distillation_losses(teacher, student, auxiliary, source, original,
                 region, teacher.config.vocab_size - 1, cond, uncond, ratio, r_init=r_init,
-                teacher_cfg=c.get('teacher_cfg',4.0), noise_emb_perturb=c.get('noise_emb_perturb',0.0), **options)
+                teacher_cfg=c.get('teacher_cfg',4.0), noise_emb_perturb=c.get('noise_emb_perturb',0.0),
+                region_weighting=c.get('region_weighting'), **options)
         require_finite(loss_s,'Nonfinite Student loss')
         acc.backward(loss_s / accumulation)
         if preflight:
@@ -179,7 +181,14 @@ def run_update(acc, teacher, models, optimizers, schedulers, batch_fn, sampler, 
                     if telemetry is not None and telemetry.token_due:
                         telemetry.tokens('aux_targets',sampled,region)
                     ratio = sampler.sample(len(source), acc.device)
-                    q = pseudo_mask(region, ratio)
+                    region_weighting = c.get('region_weighting')
+                    if (region_weighting and region_weighting.get('enabled')
+                            and region_weighting['weighted_pseudo_mask']):
+                        distance = signed_mask_distance(original, region)
+                        q = pseudo_mask(region, ratio, region_weight_map(
+                            original, region, region_weighting, distance=distance))
+                    else:
+                        q = pseudo_mask(region, ratio)
                     corrupted = torch.where(q, teacher.config.vocab_size - 1, sampled)
                 loss_a = auxiliary_ce(predict(auxiliary, corrupted, ratio, cond), sampled, q,
                                       label_smoothing=label_smoothing)

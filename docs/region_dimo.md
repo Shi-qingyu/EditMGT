@@ -12,6 +12,29 @@ Old JSON files that omit freeze/noise/warmup fields resolve freeze=false, sigma=
 
 Source Teacher profiles remain separate from runtime Halo: the loaded checkpoint's sparse/time/cache/codebook profile is checked against `expected_profile`; only afterward are the four Transformer copies configured for distillation Halo. The original mask M is passed to every forward, G is expanded once on the actual stem grid, Q is a subset of G, and tokens outside G are locked to the source. Teacher training queries use one random pseudo-mask at a floating time ratio; they are not the 18-step benchmark Teacher algorithm. No training forward uses inference KV caches. The checkpoint's cache-conditioned attention prefix/threshold remains part of its forward mathematics; disabling inference KV reuse does not disable this trained profile. Student noise is enabled in the differentiable generation and in updated-Student Auxiliary target generation, not in Teacher/Auxiliary distribution queries.
 
+### Core--Boundary--Context weighting
+
+`configs/dimo/region_dimo_cbc_inter_brush_maskedit.json` is a separate experimental recipe; it does not change or resume the historical v3 run. On the token grid it computes an 8-connected signed distance `d` from the original mask boundary: positive inside the requested edit and negative in the supervised generation halo. The interior satisfying `d >= core_margin` is Core, the exponential distance term emphasizes the two-sided Boundary, and the exterior part of the generation halo is Context.
+
+For each token in G, the Student FKL surrogate is multiplied by
+
+```text
+w = core_weight * 1[Core]
+  + boundary_weight * exp(-abs(d) / boundary_sigma)
+  + evidence_weight * JS(p_teacher_cond || p_teacher_uncond) / log(2)
+```
+
+Weights are normalized to mean one per sample over G before the existing per-sample Q reduction, preserving the nominal loss scale. The normalized JS term is computed in vocabulary chunks and adds no Teacher forward. Exact-count pseudo-mask sampling uses Gumbel top-k without replacement with the geometry-only part of `w`, in both Student and Auxiliary phases. Teacher evidence cannot control the same query that produces it without two extra preliminary Teacher forwards, so it affects FKL weighting but not current-step sampling. `weighted_pseudo_mask=false` retains uniform exact-count sampling while keeping weighted FKL; omitting `region_weighting` entirely retains the original v3 algorithm.
+
+```bash
+# Validate paths, strict Teacher profile and CBC hyperparameters only.
+bash scripts/dimo/train_cbc_inter_brush_maskedit.sh --check-only
+
+# Explicitly requested training/preflight commands remain unchanged in behavior.
+bash scripts/dimo/train_cbc_inter_brush_maskedit.sh --stop-after-preflight
+bash scripts/dimo/train_cbc_inter_brush_maskedit.sh --resume latest
+```
+
 ## Explicit assets and data
 
 Select **one** Teacher source:

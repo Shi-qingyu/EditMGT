@@ -89,12 +89,28 @@ class Telemetry:
         self.counts[name]=self.counts.get(name,0)+count
 
     @torch.no_grad()
-    def observe(self,student,teacher,auxiliary,q,sampled,region):
+    def observe(self,student,teacher,auxiliary,q,sampled,region,weights=None,evidence=None,distance=None):
         if self.diagnostic_due:
             values,n=probability_statistics(student,teacher,auxiliary,q)
             for k,v in values.items():self.add_sum(k,v,n)
         self.add_sum('region/q_tokens',q.flatten(1).sum(1).double().sum(),len(q))
         self.add_sum('region/g_tokens',region.flatten(1).sum(1).double().sum(),len(q))
+        if weights is not None:
+            self.add_sum('region/weight_q_mean',
+                         ((weights*q).flatten(1).sum(1)/q.flatten(1).sum(1)).double().sum(),len(q))
+            self.add_sum('region/weight_g_mean',
+                         ((weights*region).flatten(1).sum(1)/region.flatten(1).sum(1)).double().sum(),len(q))
+        if evidence is not None:
+            self.add_sum('region/teacher_edit_evidence_q',
+                         ((evidence*q).flatten(1).sum(1)/q.flatten(1).sum(1)).double().sum(),len(q))
+        if distance is not None:
+            boundary=(distance.abs()<1)&region
+            context=(distance<0)&region
+            margin=self.config.get('region_weighting',{}).get('core_margin',1.0)
+            core=(distance>=margin)&region
+            self.add_sum('region/core_tokens',core.flatten(1).sum(1).double().sum(),len(q))
+            self.add_sum('region/boundary_tokens',boundary.flatten(1).sum(1).double().sum(),len(q))
+            self.add_sum('region/context_tokens',context.flatten(1).sum(1).double().sum(),len(q))
         if self.token_due:self.tokens('student_phase',sampled,region)
 
     @torch.no_grad()
@@ -135,6 +151,7 @@ class Telemetry:
             world_size=acc.num_processes,loss_due=self.loss_due,grad_due=self.grad_due,
             diagnostic_due=self.diagnostic_due,token_due=self.token_due,
             teacher_cfg=self.config.get('teacher_cfg',4.0),noise_emb_perturb=self.config.get('noise_emb_perturb',0.0),
+            region_weighting=self.config.get('region_weighting'),
             source_metadata=self.config.get('source_metadata',{}))
         if acc.is_main_process:
             if histograms:

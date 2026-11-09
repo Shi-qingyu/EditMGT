@@ -84,6 +84,22 @@ def test_historical_defaults_and_v3_preset_are_distinct(tmp_path):
     assert old['teacher_cfg']==4 and old['noise_emb_perturb']==0 and old['lr_scheduler']=='constant'
 
 
+def test_region_weighting_config_is_explicit_and_strict():
+    root=Path(__file__).resolve().parents[1]
+    c=json.loads((root/'configs/dimo/region_dimo_v3.example.json').read_text())
+    c['region_weighting']={}
+    with pytest.raises(ValueError,match='region_weighting must contain exactly'):
+        validate_config(c)
+    c['region_weighting']=dict(enabled=True,core_weight=1.,boundary_weight=1.,evidence_weight=.5,
+        boundary_sigma=1.,core_margin=1.,weighted_pseudo_mask=True,evidence_chunk_size=0)
+    with pytest.raises(ValueError,match='evidence_chunk_size'):
+        validate_config(c)
+    c['region_weighting']['evidence_chunk_size']=1024
+    c['region_weighting']['boundary_sigma']=0
+    with pytest.raises(ValueError,match='boundary_sigma'):
+        validate_config(c)
+
+
 def test_nonexistent_explicit_manifest_never_falls_back(origin_dirs,tmp_path):
     root=Path(__file__).resolve().parents[1]
     run,base=origin_dirs

@@ -1,0 +1,620 @@
+{
+  "strategy": "SHA256 rank per category with seed 2027; eight/category; no old keys; no text/Han/logo/human; mask fraction 3%-35%",
+  "benchmark": "Inter-Edit",
+  "split": "test",
+  "language": "en",
+  "mask_fraction_range_64": [
+    0.03,
+    0.35
+  ],
+  "samples": [
+    {
+      "key": "sample_03647",
+      "seed_key": "inter_edit:3647",
+      "instruction": "Replace the dragon with a unicorn.",
+      "edit_type": "Local",
+      "mask_fraction_64": 0.060302734375,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/03647_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/03647_mask.png"
+      }
+    },
+    {
+      "key": "sample_01589",
+      "seed_key": "inter_edit:1589",
+      "instruction": "Change the black t-shirt to white.",
+      "edit_type": "Local",
+      "mask_fraction_64": 0.229736328125,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/01589_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/01589_mask.png"
+      }
+    },
+    {
+      "key": "sample_03228",
+      "seed_key": "inter_edit:3228",
+      "instruction": "Replace the smart bulb with a traditional incandescent bulb.",
+      "edit_type": "Local",
+      "mask_fraction_64": 0.05126953125,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/03228_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/03228_mask.png"
+      }
+    },
+    {
+      "key": "sample_01380",
+      "seed_key": "inter_edit:1380",
+      "instruction": "Replace the bottle cap with a silver metallic one.",
+      "edit_type": "Local",
+      "mask_fraction_64": 0.087890625,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/01380_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/01380_mask.png"
+      }
+    },
+    {
+      "key": "sample_05768",
+      "seed_key": "inter_edit:5768",
+      "instruction": "Replace the leftmost starfish with a glowing jellyfish",
+      "edit_type": "Local",
+      "mask_fraction_64": 0.059326171875,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/05768_source.png"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/05768_mask.png"
+      }
+    },
+    {
+      "key": "sample_02858",
+      "seed_key": "inter_edit:2858",
+      "instruction": "Replace the submarine with a modern aircraft carrier.",
+      "edit_type": "Local",
+      "mask_fraction_64": 0.08251953125,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/02858_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/02858_mask.png"
+      }
+    },
+    {
+      "key": "sample_02317",
+      "seed_key": "inter_edit:2317",
+      "instruction": "Replace the electric guitar with an acoustic guitar.",
+      "edit_type": "Local",
+      "mask_fraction_64": 0.142822265625,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/02317_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/02317_mask.png"
+      }
+    },
+    {
+      "key": "sample_04304",
+      "seed_key": "inter_edit:4304",
+      "instruction": "Replace the wooden vanity with a sleek white marble countertop.",
+      "edit_type": "Local",
+      "mask_fraction_64": 0.11767578125,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/04304_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/04304_mask.png"
+      }
+    },
+    {
+      "key": "sample_02100",
+      "seed_key": "inter_edit:2100",
+      "instruction": "Add a calculator.",
+      "edit_type": "Add",
+      "mask_fraction_64": 0.116943359375,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/02100_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/02100_mask.png"
+      }
+    },
+    {
+      "key": "sample_01761",
+      "seed_key": "inter_edit:1761",
+      "instruction": "Add a steaming spoonful of soup.",
+      "edit_type": "Add",
+      "mask_fraction_64": 0.2041015625,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/01761_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/01761_mask.png"
+      }
+    },
+    {
+      "key": "sample_05069",
+      "seed_key": "inter_edit:5069",
+      "instruction": "Add a cat sleeping on the couch.",
+      "edit_type": "Add",
+      "mask_fraction_64": 0.101318359375,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/05069_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/05069_mask.png"
+      }
+    },
+    {
+      "key": "sample_00144",
+      "seed_key": "inter_edit:144",
+      "instruction": "Add a snowman, insert a sleigh with reindeer.",
+      "edit_type": "Add",
+      "mask_fraction_64": 0.173583984375,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/00144_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/00144_mask.png"
+      }
+    },
+    {
+      "key": "sample_00795",
+      "seed_key": "inter_edit:795",
+      "instruction": "Add a matching black handbag.",
+      "edit_type": "Add",
+      "mask_fraction_64": 0.19287109375,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/00795_source.jpeg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/00795_mask.png"
+      }
+    },
+    {
+      "key": "sample_04203",
+      "seed_key": "inter_edit:4203",
+      "instruction": "Add a seashell and a small crab.",
+      "edit_type": "Add",
+      "mask_fraction_64": 0.05029296875,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/04203_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/04203_mask.png"
+      }
+    },
+    {
+      "key": "sample_00163",
+      "seed_key": "inter_edit:163",
+      "instruction": "Add a delicate gold chain connecting them.",
+      "edit_type": "Add",
+      "mask_fraction_64": 0.065673828125,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/00163_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/00163_mask.png"
+      }
+    },
+    {
+      "key": "sample_00342",
+      "seed_key": "inter_edit:342",
+      "instruction": "Add a small potted plant.",
+      "edit_type": "Add",
+      "mask_fraction_64": 0.150390625,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/00342_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/00342_mask.png"
+      }
+    },
+    {
+      "key": "sample_06015",
+      "seed_key": "inter_edit:6015",
+      "instruction": "Remove the boat",
+      "edit_type": "Remove",
+      "mask_fraction_64": 0.04052734375,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/06015_source.png"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/06015_mask.png"
+      }
+    },
+    {
+      "key": "sample_00400",
+      "seed_key": "inter_edit:400",
+      "instruction": "Remove the glass rim and shadow.",
+      "edit_type": "Remove",
+      "mask_fraction_64": 0.33544921875,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/00400_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/00400_mask.png"
+      }
+    },
+    {
+      "key": "sample_04448",
+      "seed_key": "inter_edit:4448",
+      "instruction": "Remove the pedals.",
+      "edit_type": "Remove",
+      "mask_fraction_64": 0.133544921875,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/04448_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/04448_mask.png"
+      }
+    },
+    {
+      "key": "sample_01607",
+      "seed_key": "inter_edit:1607",
+      "instruction": "Remove the cake",
+      "edit_type": "Remove",
+      "mask_fraction_64": 0.0390625,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/01607_source.png"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/01607_mask.png"
+      }
+    },
+    {
+      "key": "sample_01043",
+      "seed_key": "inter_edit:1043",
+      "instruction": "Remove the box, keep the greeting card.",
+      "edit_type": "Remove",
+      "mask_fraction_64": 0.28955078125,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/01043_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/01043_mask.png"
+      }
+    },
+    {
+      "key": "sample_03148",
+      "seed_key": "inter_edit:3148",
+      "instruction": "Remove the cross.",
+      "edit_type": "Remove",
+      "mask_fraction_64": 0.126953125,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/03148_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/03148_mask.png"
+      }
+    },
+    {
+      "key": "sample_04756",
+      "seed_key": "inter_edit:4756",
+      "instruction": "Remove the swords.",
+      "edit_type": "Remove",
+      "mask_fraction_64": 0.322509765625,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/04756_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/04756_mask.png"
+      }
+    },
+    {
+      "key": "sample_04895",
+      "seed_key": "inter_edit:4895",
+      "instruction": "Remove the red lines, keep the speaker.",
+      "edit_type": "Remove",
+      "mask_fraction_64": 0.114013671875,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/04895_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/04895_mask.png"
+      }
+    },
+    {
+      "key": "sample_00259",
+      "seed_key": "inter_edit:259",
+      "instruction": "Transform the fabric into shiny silk, keeping the shape and flowers.",
+      "edit_type": "Texture",
+      "mask_fraction_64": 0.200439453125,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/00259_source.jpeg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/00259_mask.png"
+      }
+    },
+    {
+      "key": "sample_01143",
+      "seed_key": "inter_edit:1143",
+      "instruction": "Make the liquid dark blue.",
+      "edit_type": "Texture",
+      "mask_fraction_64": 0.22314453125,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/01143_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/01143_mask.png"
+      }
+    },
+    {
+      "key": "sample_03672",
+      "seed_key": "inter_edit:3672",
+      "instruction": "Change to stone texture.",
+      "edit_type": "Texture",
+      "mask_fraction_64": 0.290771484375,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/03672_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/03672_mask.png"
+      }
+    },
+    {
+      "key": "sample_05105",
+      "seed_key": "inter_edit:5105",
+      "instruction": "Make the frame shiny with reflective highlights.",
+      "edit_type": "Texture",
+      "mask_fraction_64": 0.15283203125,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/05105_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/05105_mask.png"
+      }
+    },
+    {
+      "key": "sample_03334",
+      "seed_key": "inter_edit:3334",
+      "instruction": "Apply a metallic sheen to the circular emblem.",
+      "edit_type": "Texture",
+      "mask_fraction_64": 0.208251953125,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/03334_source.png"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/03334_mask.png"
+      }
+    },
+    {
+      "key": "sample_06189",
+      "seed_key": "inter_edit:6189",
+      "instruction": "Make the tractor's paint chipped, add rust textures.",
+      "edit_type": "Texture",
+      "mask_fraction_64": 0.13916015625,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/06189_source.png"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/06189_mask.png"
+      }
+    },
+    {
+      "key": "sample_03355",
+      "seed_key": "inter_edit:3355",
+      "instruction": "Transform the hat into a knitted texture with subtle yarn details.",
+      "edit_type": "Texture",
+      "mask_fraction_64": 0.053466796875,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/03355_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/03355_mask.png"
+      }
+    },
+    {
+      "key": "sample_00827",
+      "seed_key": "inter_edit:827",
+      "instruction": "Change to polished marble, enhance the shine.",
+      "edit_type": "Texture",
+      "mask_fraction_64": 0.12939453125,
+      "source": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "source_images.tar",
+        "member": "source_images/00827_source.jpg"
+      },
+      "mask": {
+        "kind": "tar",
+        "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+        "archive": "masks.tar",
+        "member": "masks/00827_mask.png"
+      }
+    }
+  ]
+}

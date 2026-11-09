@@ -3,6 +3,7 @@ checkpoint
 outputs
 runs
 wandb
+third_party
 .venv/
 .venv.backup-*
 .tools/

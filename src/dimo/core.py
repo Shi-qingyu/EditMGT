@@ -15,17 +15,110 @@ def generation_mask(original, model):
     return original.bool()
 
 
-def pseudo_mask(region, ratio):
+def pseudo_mask(region, ratio, weights=None):
+    """Sample an exact-size pseudo mask, optionally without replacement by weight."""
     flat = region.flatten(1)
     if (~flat.any(1)).any():
         raise ValueError('Empty generation region')
     if ratio.shape != (len(region),) or not torch.isfinite(ratio).all() or ((ratio < 0) | (ratio > 1)).any():
         raise ValueError('Expected one finite mask ratio in [0,1] per sample')
-    # Uniform exact-count sampling, matching SFT/upstream DiMO's mask counts.
     count = (flat.sum(1) * ratio).round().long().clamp_min(1)
-    order = torch.rand_like(flat.float()).masked_fill(~flat, 2).argsort(1).argsort(1)
+    if weights is None:
+        # Uniform exact-count sampling, matching SFT/upstream DiMO's mask counts.
+        order = torch.rand_like(flat.float()).masked_fill(~flat, 2).argsort(1).argsort(1)
+    else:
+        if weights.shape != region.shape or not torch.isfinite(weights).all() or (weights < 0).any():
+            raise ValueError('Pseudo-mask weights must be finite, nonnegative and match the region')
+        flat_weights = weights.float().flatten(1).masked_fill(~flat, 0)
+        if ((flat_weights > 0).sum(1) < count).any():
+            raise ValueError('Pseudo-mask weights must be positive for enough generation tokens')
+        # Gumbel top-k is weighted sampling without replacement. Ranking supports
+        # a different exact mask count per sample without a Python batch loop.
+        uniform = torch.rand_like(flat_weights).clamp_(min=torch.finfo(torch.float32).tiny,
+                                                        max=1 - torch.finfo(torch.float32).eps)
+        score = flat_weights.clamp_min(torch.finfo(torch.float32).tiny).log()
+        score = score - (-uniform.log()).log()
+        order = score.masked_fill(~flat, -torch.inf).argsort(1, descending=True).argsort(1)
     q = (order < count[:, None]) & flat
     return q.reshape_as(region)
+
+
+def signed_mask_distance(mask, region):
+    """Discrete signed distance to a mask boundary on the token grid.
+
+    Positive values are inside ``mask`` and negative values are in the exterior
+    part of ``region``. Distances use an 8-connected (chessboard) metric, which
+    is inexpensive on GPU and matches the square token receptive field. The two
+    token bands adjacent to the boundary have magnitudes 0.5.
+    """
+    if mask.shape != region.shape or mask.ndim != 3:
+        raise ValueError('Mask and generation region must have matching [B,H,W] shapes')
+    mask, region = mask.bool(), region.bool()
+    if (mask & ~region).any():
+        raise ValueError('The original mask must be a subset of the generation region')
+    distance = torch.zeros(mask.shape, device=mask.device, dtype=torch.float32)
+    current = mask
+    # A fixed bound avoids a device-to-host synchronization at every erosion.
+    for depth in range(max(mask.shape[-2:])):
+        eroded = -F.max_pool2d(-F.pad(current[:, None].float(), (1, 1, 1, 1)), 3, stride=1)
+        eroded = eroded[:, 0].bool()
+        distance.masked_fill_(current & ~eroded, depth + 0.5)
+        current = eroded
+    covered = mask
+    for depth in range(max(mask.shape[-2:])):
+        expanded = F.max_pool2d(covered[:, None].float(), 3, stride=1, padding=1)[:, 0].bool()
+        band = expanded & ~covered & region
+        distance.masked_fill_(band, -(depth + 0.5))
+        covered = expanded
+    if (region & ~mask & distance.eq(0)).any():
+        raise ValueError('Generation region contains tokens unreachable from the edit mask')
+    return distance
+
+
+def region_weight_map(original, region, config, evidence=None, distance=None):
+    """Build normalized Core--Boundary--Context weights on the token grid."""
+    if not config or not config.get('enabled', False):
+        return None
+    original, region = original.bool(), region.bool()
+    distance = signed_mask_distance(original, region) if distance is None else distance.float()
+    if distance.shape != region.shape:
+        raise ValueError('Region distance must match the generation region')
+    core = original & (distance >= config['core_margin'])
+    weights = (config['core_weight'] * core.float()
+               + config['boundary_weight'] * torch.exp(-distance.abs() / config['boundary_sigma']))
+    if evidence is not None:
+        if evidence.shape != region.shape or not torch.isfinite(evidence).all() or (evidence < 0).any():
+            raise ValueError('Teacher edit evidence must be finite, nonnegative and match the region')
+        weights = weights + config['evidence_weight'] * evidence.float()
+    weights = weights.masked_fill(~region, 0)
+    # Preserve the effective loss scale: each sample has mean weight one in G.
+    denominator = weights.flatten(1).sum(1)
+    if (denominator <= 0).any() or not torch.isfinite(denominator).all():
+        raise ValueError('Region weights must have positive finite mass in every sample')
+    scale = region.flatten(1).sum(1).float() / denominator
+    return weights * scale[:, None, None]
+
+
+@torch.no_grad()
+def teacher_edit_evidence(conditional_logits, unconditional_logits, chunk_size=1024):
+    """Normalized JS divergence between conditional/unconditional Teacher distributions."""
+    if conditional_logits.shape != unconditional_logits.shape or conditional_logits.ndim != 4:
+        raise ValueError('Teacher evidence expects matching [B,H,W,V] logits')
+    if type(chunk_size) is not int or chunk_size < 1:
+        raise ValueError('Evidence chunk_size must be a positive integer')
+    conditional_logits, unconditional_logits = conditional_logits.detach(), unconditional_logits.detach()
+    log_z_c = torch.logsumexp(conditional_logits.float(), dim=-1)
+    log_z_u = torch.logsumexp(unconditional_logits.float(), dim=-1)
+    evidence = torch.zeros_like(log_z_c)
+    log_two = math.log(2.0)
+    for start in range(0, conditional_logits.shape[-1], chunk_size):
+        end = min(start + chunk_size, conditional_logits.shape[-1])
+        log_c = conditional_logits[..., start:end].float() - log_z_c[..., None]
+        log_u = unconditional_logits[..., start:end].float() - log_z_u[..., None]
+        log_m = torch.logaddexp(log_c, log_u) - log_two
+        evidence.add_(0.5 * ((log_c.exp() * (log_c - log_m)).sum(-1)
+                             + (log_u.exp() * (log_u - log_m)).sum(-1)))
+    return (evidence / log_two).clamp_(0, 1)
 
 
 def masked_mean(values, mask):
@@ -67,7 +160,7 @@ def composite_pixels(decoded, source, original_pixel_mask):
     return torch.where(original_pixel_mask.bool(), decoded, source)
 
 
-def fkl_surrogate(student_logits, teacher_logits, auxiliary_logits, q):
+def fkl_surrogate(student_logits, teacher_logits, auxiliary_logits, q, weights=None):
     """DiMO FKL logit gradient p_aux - p_teacher; normalized per edited sample.
 
     Follows upstream train_DIMO_Meissonic.py FKL/MSE gradient injection,
@@ -77,6 +170,10 @@ def fkl_surrogate(student_logits, teacher_logits, auxiliary_logits, q):
     direction = (auxiliary_logits.float().softmax(-1) - teacher_logits.float().softmax(-1)).detach()
     z = student_logits.float()
     loss = 0.5 * (z - (z - direction).detach()).square().sum(-1)
+    if weights is not None:
+        if weights.shape != q.shape or not torch.isfinite(weights).all() or (weights < 0).any():
+            raise ValueError('FKL weights must be finite, nonnegative and match Q')
+        loss = loss * weights
     return masked_mean(loss, q)
 
 
@@ -95,7 +192,7 @@ def predict(model, tokens, ratio, conditions, noise_emb_perturb=0.0):
 
 def distillation_losses(teacher, student, auxiliary, source, original, region, mask_id,
                         conditions, empty_conditions, ratio, r_init=1.0, diagnostics=None,
-                        teacher_cfg=4.0, noise_emb_perturb=0.0):
+                        teacher_cfg=4.0, noise_emb_perturb=0.0, region_weighting=None):
     if isinstance(teacher_cfg, bool) or not math.isfinite(teacher_cfg) or teacher_cfg < 1:
         raise ValueError('teacher_cfg must be finite and >=1')
     if (not torch.equal(conditions['target_edit_mask'], original)
@@ -104,16 +201,26 @@ def distillation_losses(teacher, student, auxiliary, source, original, region, m
     logits, sampled = generate_one_step(student, source, original, mask_id, conditions,
                                         r_init=r_init, return_logits=True, noise_emb_perturb=noise_emb_perturb)
     with torch.no_grad():
-        q = pseudo_mask(region, ratio)
+        distance = signed_mask_distance(original, region) if region_weighting and region_weighting.get('enabled') else None
+        geometry_weights = region_weight_map(original, region, region_weighting, distance=distance)
+        if geometry_weights is not None and region_weighting['weighted_pseudo_mask']:
+            q = pseudo_mask(region, ratio, geometry_weights)
+        else:
+            q = pseudo_mask(region, ratio)
         corrupted = torch.where(q, mask_id, sampled)
         conditional = predict(teacher, corrupted, ratio, conditions)
         unconditional = predict(teacher, corrupted, ratio, empty_conditions)
         teacher_logits = unconditional + teacher_cfg * (conditional - unconditional)
+        evidence = (teacher_edit_evidence(conditional, unconditional,
+                                          region_weighting['evidence_chunk_size'])
+                    if geometry_weights is not None and region_weighting['evidence_weight'] > 0 else None)
+        loss_weights = region_weight_map(original, region, region_weighting, evidence, distance)
         # Only the gradient-enabled Auxiliary forward owns its DDP reducer.
         auxiliary_logits = predict(getattr(auxiliary, 'module', auxiliary), corrupted, ratio, conditions)
-    student_loss = fkl_surrogate(logits, teacher_logits, auxiliary_logits, q)
+    student_loss = fkl_surrogate(logits, teacher_logits, auxiliary_logits, q, loss_weights)
     if diagnostics is not None:
-        diagnostics(logits, teacher_logits, auxiliary_logits, q, sampled, region)
+        diagnostics(logits, teacher_logits, auxiliary_logits, q, sampled, region,
+                    weights=loss_weights, evidence=evidence, distance=distance)
     return student_loss, (corrupted, sampled, q, ratio)
 
 

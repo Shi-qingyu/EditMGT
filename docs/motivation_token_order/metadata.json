@@ -1,0 +1,983 @@
+{
+  "version": 1,
+  "identity": {
+    "protocol": {
+      "model_label": "Dense EditMGT",
+      "model_protocol": "native_editmgt_mask_free_no_cache",
+      "dataset_label": "Inter-Edit test/en",
+      "model_path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT",
+      "model_files": [
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/editmgt/config.json",
+          "size": 527,
+          "mtime_ns": 1787716896098168202,
+          "sha256": "68effa13da0faa17b41dfcb754d81b7402044ff64d8ca9eb7f678d60263e2948"
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/editmgt/diffusion_pytorch_model.safetensors",
+          "size": 4037327888,
+          "mtime_ns": 1787716992698286629
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/config.json",
+          "size": 838,
+          "mtime_ns": 1787716896108298487,
+          "sha256": "eacec6c5ca317a87ed2c46789d9705b9274db5027e7ba59da739bfae23addb55"
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/generation_config.json",
+          "size": 187,
+          "mtime_ns": 1787716896379209622,
+          "sha256": "a543a5d299bc2b20c52bd87ed174f561266510b57a392e12b5b5d758d798ce05"
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/model-00001-of-00002.safetensors",
+          "size": 4988025760,
+          "mtime_ns": 1787717004582096261
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/model-00002-of-00002.safetensors",
+          "size": 240691728,
+          "mtime_ns": 1787716933209792030
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/model.safetensors.index.json",
+          "size": 24223,
+          "mtime_ns": 1787716899878220260,
+          "sha256": "ada0043f3e3b2e5ab2f445cad9c0fbbf9d91ad444675e6a82b822591c63abf5a"
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/special_tokens_map.json",
+          "size": 636,
+          "mtime_ns": 1787716899922641204,
+          "sha256": "baec30ea10906f16adb8c18af7a34023002c1746542612b8b41c9f09e1351351"
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/tokenizer.json",
+          "size": 17525357,
+          "mtime_ns": 1787716913918476280
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/tokenizer.model",
+          "size": 4241003,
+          "mtime_ns": 1787716914049928711,
+          "sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2"
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/tokenizer_config.json",
+          "size": 46996,
+          "mtime_ns": 1787716900951912113,
+          "sha256": "cb32b7929c62608d46572e813112b3ad8a841fb98fdd6a4da8559e368a951c89"
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/scheduler/scheduler_config.json",
+          "size": 124,
+          "mtime_ns": 1787716901997843619,
+          "sha256": "de28f73f40d0834ac252ac65ef48dc35fcec8a3b50b52cd80d0bb7c99884bdb6"
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/text_encoder/config.json",
+          "size": 570,
+          "mtime_ns": 1787716902726892520,
+          "sha256": "d891548c47c3c7770f3419af22093c7f98e76f6e5ec77fd444ef24ee76607aed"
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/text_encoder/model.safetensors",
+          "size": 1416177568,
+          "mtime_ns": 1787717012783484495
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/tokenizer/merges.txt",
+          "size": 524619,
+          "mtime_ns": 1787716904665012216,
+          "sha256": "9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a"
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/tokenizer/special_tokens_map.json",
+          "size": 460,
+          "mtime_ns": 1787716904625910591,
+          "sha256": "f118ab3a983206e4f32583448de6bd6aae4ee21869135cef1f5848a753cdaab6"
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/tokenizer/tokenizer_config.json",
+          "size": 855,
+          "mtime_ns": 1787716906871081508,
+          "sha256": "516314ccab66918d7cb647480ac27abd3520d14e1e5825aac99f50c851c16071"
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/tokenizer/vocab.json",
+          "size": 1059962,
+          "mtime_ns": 1787716907537448519,
+          "sha256": "e089ad92ba36837a0d31433e555c8f45fe601ab5c221d4f607ded32d9f7a4349"
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/vqvae/config.json",
+          "size": 799,
+          "mtime_ns": 1787716910615258944,
+          "sha256": "f543c65e38300b098436a93d7b2c9e8246b47b3e9be8e0e6e37a5a5c6a050161"
+        },
+        {
+          "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/vqvae/diffusion_pytorch_model.safetensors",
+          "size": 585009980,
+          "mtime_ns": 1787716995190093030
+        }
+      ],
+      "torch_version": "2.11.0+cu130",
+      "python_version": "3.10.20 (main, May 10 2026, 19:27:29) [Clang 22.1.3 ]",
+      "device_name": "NVIDIA H20",
+      "resolution": 1024,
+      "num_inference_steps": 36,
+      "guidance_scale": 6.0,
+      "reference_strength": 1.1,
+      "negative_prompt": "worst quality, low quality, low res, blurry, distortion, watermark, logo, signature, text, jpeg artifacts, signature, sketch, duplicate, ugly, identifying mark",
+      "dtype": "bfloat16",
+      "seed": 42,
+      "mask_role": "analysis_only",
+      "source_token_lock": false,
+      "sparse_target": false,
+      "reference_kv_cache": false,
+      "condition_kv_cache": false,
+      "output_compositing": "none",
+      "token_mask_projection": "nearest_neighbor",
+      "entropy": "float32 post-CFG full-grid logits; natural logarithm; all positions",
+      "stability": "raw per-step argmax disagreement with final-forward raw argmax",
+      "frame_type": "scheduler prev_sample; uncommitted mask-token cells shown in solid gray",
+      "snapshot_interval": 6,
+      "unresolved_gray_rgb": [
+        166,
+        166,
+        166
+      ],
+      "masked_token_decode_fill": 0,
+      "image_preprocessing": "source and annotation square-resized together before native preprocessing",
+      "entropy_chunk_size": 256,
+      "captured_image_steps": [
+        6,
+        12,
+        18,
+        24,
+        30,
+        36
+      ],
+      "collector_sha256": "0ffb73e4fa40dbd3158ffb3223e5350c26efda96dcb2a854f64dc4b8bfe6b2da",
+      "implementation_sha256": {
+        "src/attention_utils.py": "859f824c21439d50666888ba7f0423768c6efc3721c66663afec052ce8c84de5",
+        "src/benchmark_data.py": "f7d0296e79ff4aecb43cc8540b207635b21212260ad64564b4e567a6f4748eac",
+        "src/benchmark_metrics.py": "87269c5392f3c884460a7c949ea1cfe687cb41cb3747c5bf1240eefed171b651",
+        "src/benchmark_parallel.py": "ab0389ff4bb0328ff986e2a7b5008b8414053f73c85be72db7e890129300df5e",
+        "src/benchmark_utils.py": "9e4e7e1294c40fa8618b324dc68330cb6d336b4d2146d8d474342b915bd67394",
+        "src/dataset_utils.py": "1ce0a2a22c8d3391ba13c30e365ecce23b8d1edf0c35a93d6eb8c7d7d4db3c2c",
+        "src/dimo/__init__.py": "c5aba167611c6ef798c51623de260864a6cf5fb66eb90b1fb4cc1b59d788670d",
+        "src/dimo/benchmark.py": "0a09c81a2981d81e6979b1a3a45ad9012033579cd6cfd7434a58b9778228533b",
+        "src/dimo/checkpoint.py": "d05905d5864ea2bedbe50226e83de92169f5170624db6097e8a215dfba1b7be5",
+        "src/dimo/config.py": "f11a459c1326298457d10eba3c7f584c696b6f35fce2e1bc67a1874eaac47fd5",
+        "src/dimo/core.py": "86a1fbb40651d52a93dc7edd74f3c52ef70c836d7e2c0e54e9edac1408749ad1",
+        "src/dimo/data.py": "475a07f42b9c6043d6686b2a39df84eeda1a6d26ed33132f9788c3bcfe390c78",
+        "src/dimo/device.py": "de0eb405086ef6fa39f997b41d75fb2056097333c9ad15db6cf53006b50ea0be",
+        "src/dimo/export.py": "d2a1ccc166f171387072c843fce8abb9843ca3c80c4c2d0ce1a715971819220a",
+        "src/dimo/infer.py": "4546f0a3a44c3a15f933c0ed575535cb3141db73e5a05ef4773025d083178c38",
+        "src/dimo/manifest_data.py": "149ec73a624a6417ecc5ad28fd4a5b19671f8297a171a8b7af9c383184bc429f",
+        "src/dimo/optimization.py": "3e6d9c52510233b9f554a904e72116506c58a889da5c5ca1f814631a924a3a7c",
+        "src/dimo/origin.py": "bc885f753802de5968967846230ca6ac77800de834206d24d10934ee84320449",
+        "src/dimo/preflight.py": "2a5d223adc57fccce6ec852ebe3abbb77b5378d8ebbdecf06f8fc078909ff2d3",
+        "src/dimo/smoke.py": "93d6609b6b3da29de04ecd4c5aeb59e3c40e2fab1beb5cb37e3356f453a66efc",
+        "src/dimo/telemetry.py": "c6d86cd9bc7fa23e25a781cf388298464a19812d0243eb849e2072988cbe0723",
+        "src/dimo/train.py": "d856a192ae922e9b596c8fe20b891452ce66de14acac2965d8fd6d4db9a50244",
+        "src/dimo/visualization.py": "5b90bdd4e789a00c5ef2a407605c0981dcb7b19da50cd9bb58575bd799d60b8c",
+        "src/editmgt.py": "98e67762634cd4c0788b7dd0104005a3b2ef60dc344fd3abec0bb1572253c456",
+        "src/inter_edit_dataset.py": "fc0404e3a404f78b27c1c9e9996e014e0a60f8d04943935881729bd191c477a3",
+        "src/inter_edit_translations.py": "f4eed80543e906d00c361e600b3fa082500f422a6f9e05c99bca2ef68b7a8493",
+        "src/local_utils.py": "85660080ef78e5c50347632b7b15b077d7fe7f20f42af56e1ae12e5e36b11bbd",
+        "src/magicbrush_dataset.py": "7d6330f953d5eb9ea01ad88a6b84786d33ae19ef4602239898cb4a4eb03f9ee6",
+        "src/mask_schedule.py": "5c4ce93283f44125ea9979e0bfd718636dea5c64779d1c0bad7978ca80abde34",
+        "src/mask_utils.py": "55da8cc10ae98eb57718bec2f7d83d4d4a53062fe331710efa5d7fb9caf45ed9",
+        "src/maskedit_dataset.py": "9c76ff6a2bd979d87ef2db8e9d97ec90b21cad84e8e3885a60de2031970f8699",
+        "src/mixed_edit_dataset.py": "01aee067ce8987c6c08179c0d5dbeb23170a3b7cfb8f56d36317722de3a64597",
+        "src/pie_bench_data.py": "aec32cf20ce187ef5f144dda6b187578eb322d25dcf3ce2c86c95d3c5fd5a847",
+        "src/pie_bench_metrics.py": "49e5b47351fbf88da987b08e71a24a8d85953fc33208e70e2c603b61e29ba827",
+        "src/pipeline.py": "f9d8da5cebf8fa12c985135cd56a6605239863ce3dd278cad1bf02632a215beb",
+        "src/reference_cache.py": "6e3bc28d6571ae7882a99d211b34662c8f15c2c6609f1dead60c0eade7cb1df7",
+        "src/scheduler.py": "cb3dbcbe880c8e42832ea070273a26f378c11752899c0fd168cc6e4480d3348b",
+        "src/sparse_utils.py": "4e86553e7bb48b0821678c17aba6be0f039ce90f3871a51e436a0835bf9def64",
+        "src/timestep_sampling.py": "64557f172f8e0a332cf79c7bcd3b7490c4078c9dc3cdb858b602926be11ff281",
+        "src/train_validation.py": "b5d1ca779e7e64060af1c4b1973203ae451abc7132a664942c0e6d6d701439c4",
+        "src/training_data.py": "bd44c409c1af3a5071c5b76bebf799451b271c5b9236ffd2bf717f48e81bf554",
+        "src/training_resume.py": "f8980df45ac5652676eb7a01d58429ca896b5b4822aa7b7c9d449189a363c57e",
+        "src/transformer.py": "08f9fd447fb8658134a7c0b3879b02259ec08910d36b15774d769b539bfe1c48",
+        "src/v2_model.py": "2394e4b8749fdb98df71306193a1c6448416f13d3bd669e0cc7739d00b7bc71b",
+        "src/v2_utils.py": "32399c0011fd8029854e4504c1f7c83bf306c00e8dff97ec521f9cac836682c5"
+      }
+    },
+    "selection": {
+      "strategy": "sha256_rank_independent_of_model_quality",
+      "benchmark": "Inter-Edit",
+      "split": "test",
+      "language": "en",
+      "metadata": "/mnt/geminihzceph/public/data/Inter-Edit/test/metadata.json",
+      "metadata_sha256": "1336492dab1a2d23957724ece26f32b1c826bdda81a5983b0fc7db8fcef41147",
+      "candidate_count": 3413,
+      "selection_seed": 2026,
+      "selected_keys": [
+        "sample_02586",
+        "sample_04330",
+        "sample_02832",
+        "sample_04776",
+        "sample_02168",
+        "sample_03987",
+        "sample_02431",
+        "sample_05134"
+      ]
+    },
+    "inputs": [
+      {
+        "key": "sample_02586",
+        "seed_key": "inter_edit:2586",
+        "instruction": "Add green text \"Golden Apples\" above.",
+        "edit_type": "Text Editing",
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/02586_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/02586_mask.png"
+        }
+      },
+      {
+        "key": "sample_04330",
+        "seed_key": "inter_edit:4330",
+        "instruction": "Add the text \"Vintage elegance\" in a subtle brown color.",
+        "edit_type": "Text Editing",
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/04330_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/04330_mask.png"
+        }
+      },
+      {
+        "key": "sample_02832",
+        "seed_key": "inter_edit:2832",
+        "instruction": "Replace black suspenders with red ones.",
+        "edit_type": "Local",
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/02832_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/02832_mask.png"
+        }
+      },
+      {
+        "key": "sample_04776",
+        "seed_key": "inter_edit:4776",
+        "instruction": "Replace the black T-shirt with a white T-shirt.",
+        "edit_type": "Local",
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/04776_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/04776_mask.png"
+        }
+      },
+      {
+        "key": "sample_02168",
+        "seed_key": "inter_edit:2168",
+        "instruction": "Add a vase with colorful flowers",
+        "edit_type": "Add",
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/02168_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/02168_mask.png"
+        }
+      },
+      {
+        "key": "sample_03987",
+        "seed_key": "inter_edit:3987",
+        "instruction": "add the text \"Emergency Response\" above",
+        "edit_type": "Text Editing",
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/03987_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/03987_mask.png"
+        }
+      },
+      {
+        "key": "sample_02431",
+        "seed_key": "inter_edit:2431",
+        "instruction": "Add a beach umbrella.",
+        "edit_type": "Add",
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/02431_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/02431_mask.png"
+        }
+      },
+      {
+        "key": "sample_05134",
+        "seed_key": "inter_edit:5134",
+        "instruction": "Insert a glowing moon.",
+        "edit_type": "Add",
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/05134_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/05134_mask.png"
+        }
+      }
+    ],
+    "input_files": [
+      {
+        "path": "/mnt/geminihzceph/public/data/Inter-Edit/test/masks.tar",
+        "size": 54538240,
+        "mtime_ns": 1791978716136860928
+      },
+      {
+        "path": "/mnt/geminihzceph/public/data/Inter-Edit/test/source_images.tar",
+        "size": 3798896640,
+        "mtime_ns": 1791978788833545336
+      }
+    ]
+  },
+  "protocol": {
+    "model_label": "Dense EditMGT",
+    "model_protocol": "native_editmgt_mask_free_no_cache",
+    "dataset_label": "Inter-Edit test/en",
+    "model_path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT",
+    "model_files": [
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/editmgt/config.json",
+        "size": 527,
+        "mtime_ns": 1787716896098168202,
+        "sha256": "68effa13da0faa17b41dfcb754d81b7402044ff64d8ca9eb7f678d60263e2948"
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/editmgt/diffusion_pytorch_model.safetensors",
+        "size": 4037327888,
+        "mtime_ns": 1787716992698286629
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/config.json",
+        "size": 838,
+        "mtime_ns": 1787716896108298487,
+        "sha256": "eacec6c5ca317a87ed2c46789d9705b9274db5027e7ba59da739bfae23addb55"
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/generation_config.json",
+        "size": 187,
+        "mtime_ns": 1787716896379209622,
+        "sha256": "a543a5d299bc2b20c52bd87ed174f561266510b57a392e12b5b5d758d798ce05"
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/model-00001-of-00002.safetensors",
+        "size": 4988025760,
+        "mtime_ns": 1787717004582096261
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/model-00002-of-00002.safetensors",
+        "size": 240691728,
+        "mtime_ns": 1787716933209792030
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/model.safetensors.index.json",
+        "size": 24223,
+        "mtime_ns": 1787716899878220260,
+        "sha256": "ada0043f3e3b2e5ab2f445cad9c0fbbf9d91ad444675e6a82b822591c63abf5a"
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/special_tokens_map.json",
+        "size": 636,
+        "mtime_ns": 1787716899922641204,
+        "sha256": "baec30ea10906f16adb8c18af7a34023002c1746542612b8b41c9f09e1351351"
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/tokenizer.json",
+        "size": 17525357,
+        "mtime_ns": 1787716913918476280
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/tokenizer.model",
+        "size": 4241003,
+        "mtime_ns": 1787716914049928711,
+        "sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2"
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/llm_encoder/tokenizer_config.json",
+        "size": 46996,
+        "mtime_ns": 1787716900951912113,
+        "sha256": "cb32b7929c62608d46572e813112b3ad8a841fb98fdd6a4da8559e368a951c89"
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/scheduler/scheduler_config.json",
+        "size": 124,
+        "mtime_ns": 1787716901997843619,
+        "sha256": "de28f73f40d0834ac252ac65ef48dc35fcec8a3b50b52cd80d0bb7c99884bdb6"
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/text_encoder/config.json",
+        "size": 570,
+        "mtime_ns": 1787716902726892520,
+        "sha256": "d891548c47c3c7770f3419af22093c7f98e76f6e5ec77fd444ef24ee76607aed"
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/text_encoder/model.safetensors",
+        "size": 1416177568,
+        "mtime_ns": 1787717012783484495
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/tokenizer/merges.txt",
+        "size": 524619,
+        "mtime_ns": 1787716904665012216,
+        "sha256": "9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a"
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/tokenizer/special_tokens_map.json",
+        "size": 460,
+        "mtime_ns": 1787716904625910591,
+        "sha256": "f118ab3a983206e4f32583448de6bd6aae4ee21869135cef1f5848a753cdaab6"
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/tokenizer/tokenizer_config.json",
+        "size": 855,
+        "mtime_ns": 1787716906871081508,
+        "sha256": "516314ccab66918d7cb647480ac27abd3520d14e1e5825aac99f50c851c16071"
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/tokenizer/vocab.json",
+        "size": 1059962,
+        "mtime_ns": 1787716907537448519,
+        "sha256": "e089ad92ba36837a0d31433e555c8f45fe601ab5c221d4f607ded32d9f7a4349"
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/vqvae/config.json",
+        "size": 799,
+        "mtime_ns": 1787716910615258944,
+        "sha256": "f543c65e38300b098436a93d7b2c9e8246b47b3e9be8e0e6e37a5a5c6a050161"
+      },
+      {
+        "path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT/vqvae/diffusion_pytorch_model.safetensors",
+        "size": 585009980,
+        "mtime_ns": 1787716995190093030
+      }
+    ],
+    "torch_version": "2.11.0+cu130",
+    "python_version": "3.10.20 (main, May 10 2026, 19:27:29) [Clang 22.1.3 ]",
+    "device_name": "NVIDIA H20",
+    "resolution": 1024,
+    "num_inference_steps": 36,
+    "guidance_scale": 6.0,
+    "reference_strength": 1.1,
+    "negative_prompt": "worst quality, low quality, low res, blurry, distortion, watermark, logo, signature, text, jpeg artifacts, signature, sketch, duplicate, ugly, identifying mark",
+    "dtype": "bfloat16",
+    "seed": 42,
+    "mask_role": "analysis_only",
+    "source_token_lock": false,
+    "sparse_target": false,
+    "reference_kv_cache": false,
+    "condition_kv_cache": false,
+    "output_compositing": "none",
+    "token_mask_projection": "nearest_neighbor",
+    "entropy": "float32 post-CFG full-grid logits; natural logarithm; all positions",
+    "stability": "raw per-step argmax disagreement with final-forward raw argmax",
+    "frame_type": "scheduler prev_sample; uncommitted mask-token cells shown in solid gray",
+    "snapshot_interval": 6,
+    "unresolved_gray_rgb": [
+      166,
+      166,
+      166
+    ],
+    "masked_token_decode_fill": 0,
+    "image_preprocessing": "source and annotation square-resized together before native preprocessing",
+    "entropy_chunk_size": 256,
+    "captured_image_steps": [
+      6,
+      12,
+      18,
+      24,
+      30,
+      36
+    ],
+    "collector_sha256": "0ffb73e4fa40dbd3158ffb3223e5350c26efda96dcb2a854f64dc4b8bfe6b2da",
+    "implementation_sha256": {
+      "src/attention_utils.py": "859f824c21439d50666888ba7f0423768c6efc3721c66663afec052ce8c84de5",
+      "src/benchmark_data.py": "f7d0296e79ff4aecb43cc8540b207635b21212260ad64564b4e567a6f4748eac",
+      "src/benchmark_metrics.py": "87269c5392f3c884460a7c949ea1cfe687cb41cb3747c5bf1240eefed171b651",
+      "src/benchmark_parallel.py": "ab0389ff4bb0328ff986e2a7b5008b8414053f73c85be72db7e890129300df5e",
+      "src/benchmark_utils.py": "9e4e7e1294c40fa8618b324dc68330cb6d336b4d2146d8d474342b915bd67394",
+      "src/dataset_utils.py": "1ce0a2a22c8d3391ba13c30e365ecce23b8d1edf0c35a93d6eb8c7d7d4db3c2c",
+      "src/dimo/__init__.py": "c5aba167611c6ef798c51623de260864a6cf5fb66eb90b1fb4cc1b59d788670d",
+      "src/dimo/benchmark.py": "0a09c81a2981d81e6979b1a3a45ad9012033579cd6cfd7434a58b9778228533b",
+      "src/dimo/checkpoint.py": "d05905d5864ea2bedbe50226e83de92169f5170624db6097e8a215dfba1b7be5",
+      "src/dimo/config.py": "f11a459c1326298457d10eba3c7f584c696b6f35fce2e1bc67a1874eaac47fd5",
+      "src/dimo/core.py": "86a1fbb40651d52a93dc7edd74f3c52ef70c836d7e2c0e54e9edac1408749ad1",
+      "src/dimo/data.py": "475a07f42b9c6043d6686b2a39df84eeda1a6d26ed33132f9788c3bcfe390c78",
+      "src/dimo/device.py": "de0eb405086ef6fa39f997b41d75fb2056097333c9ad15db6cf53006b50ea0be",
+      "src/dimo/export.py": "d2a1ccc166f171387072c843fce8abb9843ca3c80c4c2d0ce1a715971819220a",
+      "src/dimo/infer.py": "4546f0a3a44c3a15f933c0ed575535cb3141db73e5a05ef4773025d083178c38",
+      "src/dimo/manifest_data.py": "149ec73a624a6417ecc5ad28fd4a5b19671f8297a171a8b7af9c383184bc429f",
+      "src/dimo/optimization.py": "3e6d9c52510233b9f554a904e72116506c58a889da5c5ca1f814631a924a3a7c",
+      "src/dimo/origin.py": "bc885f753802de5968967846230ca6ac77800de834206d24d10934ee84320449",
+      "src/dimo/preflight.py": "2a5d223adc57fccce6ec852ebe3abbb77b5378d8ebbdecf06f8fc078909ff2d3",
+      "src/dimo/smoke.py": "93d6609b6b3da29de04ecd4c5aeb59e3c40e2fab1beb5cb37e3356f453a66efc",
+      "src/dimo/telemetry.py": "c6d86cd9bc7fa23e25a781cf388298464a19812d0243eb849e2072988cbe0723",
+      "src/dimo/train.py": "d856a192ae922e9b596c8fe20b891452ce66de14acac2965d8fd6d4db9a50244",
+      "src/dimo/visualization.py": "5b90bdd4e789a00c5ef2a407605c0981dcb7b19da50cd9bb58575bd799d60b8c",
+      "src/editmgt.py": "98e67762634cd4c0788b7dd0104005a3b2ef60dc344fd3abec0bb1572253c456",
+      "src/inter_edit_dataset.py": "fc0404e3a404f78b27c1c9e9996e014e0a60f8d04943935881729bd191c477a3",
+      "src/inter_edit_translations.py": "f4eed80543e906d00c361e600b3fa082500f422a6f9e05c99bca2ef68b7a8493",
+      "src/local_utils.py": "85660080ef78e5c50347632b7b15b077d7fe7f20f42af56e1ae12e5e36b11bbd",
+      "src/magicbrush_dataset.py": "7d6330f953d5eb9ea01ad88a6b84786d33ae19ef4602239898cb4a4eb03f9ee6",
+      "src/mask_schedule.py": "5c4ce93283f44125ea9979e0bfd718636dea5c64779d1c0bad7978ca80abde34",
+      "src/mask_utils.py": "55da8cc10ae98eb57718bec2f7d83d4d4a53062fe331710efa5d7fb9caf45ed9",
+      "src/maskedit_dataset.py": "9c76ff6a2bd979d87ef2db8e9d97ec90b21cad84e8e3885a60de2031970f8699",
+      "src/mixed_edit_dataset.py": "01aee067ce8987c6c08179c0d5dbeb23170a3b7cfb8f56d36317722de3a64597",
+      "src/pie_bench_data.py": "aec32cf20ce187ef5f144dda6b187578eb322d25dcf3ce2c86c95d3c5fd5a847",
+      "src/pie_bench_metrics.py": "49e5b47351fbf88da987b08e71a24a8d85953fc33208e70e2c603b61e29ba827",
+      "src/pipeline.py": "f9d8da5cebf8fa12c985135cd56a6605239863ce3dd278cad1bf02632a215beb",
+      "src/reference_cache.py": "6e3bc28d6571ae7882a99d211b34662c8f15c2c6609f1dead60c0eade7cb1df7",
+      "src/scheduler.py": "cb3dbcbe880c8e42832ea070273a26f378c11752899c0fd168cc6e4480d3348b",
+      "src/sparse_utils.py": "4e86553e7bb48b0821678c17aba6be0f039ce90f3871a51e436a0835bf9def64",
+      "src/timestep_sampling.py": "64557f172f8e0a332cf79c7bcd3b7490c4078c9dc3cdb858b602926be11ff281",
+      "src/train_validation.py": "b5d1ca779e7e64060af1c4b1973203ae451abc7132a664942c0e6d6d701439c4",
+      "src/training_data.py": "bd44c409c1af3a5071c5b76bebf799451b271c5b9236ffd2bf717f48e81bf554",
+      "src/training_resume.py": "f8980df45ac5652676eb7a01d58429ca896b5b4822aa7b7c9d449189a363c57e",
+      "src/transformer.py": "08f9fd447fb8658134a7c0b3879b02259ec08910d36b15774d769b539bfe1c48",
+      "src/v2_model.py": "2394e4b8749fdb98df71306193a1c6448416f13d3bd669e0cc7739d00b7bc71b",
+      "src/v2_utils.py": "32399c0011fd8029854e4504c1f7c83bf306c00e8dff97ec521f9cac836682c5"
+    }
+  },
+  "selection": {
+    "strategy": "sha256_rank_independent_of_model_quality",
+    "benchmark": "Inter-Edit",
+    "split": "test",
+    "language": "en",
+    "metadata": "/mnt/geminihzceph/public/data/Inter-Edit/test/metadata.json",
+    "metadata_sha256": "1336492dab1a2d23957724ece26f32b1c826bdda81a5983b0fc7db8fcef41147",
+    "candidate_count": 3413,
+    "selection_seed": 2026,
+    "selected_keys": [
+      "sample_02586",
+      "sample_04330",
+      "sample_02832",
+      "sample_04776",
+      "sample_02168",
+      "sample_03987",
+      "sample_02431",
+      "sample_05134"
+    ]
+  },
+  "created_at": "2026-11-09T07:22:03.048136+00:00",
+  "samples": [
+    {
+      "key": "sample_02586",
+      "instruction": "Add green text \"Golden Apples\" above.",
+      "seed": 774645469793758696,
+      "directory": "samples/sample_02586-f3a6fd08",
+      "source": "samples/sample_02586-f3a6fd08/source.png",
+      "mask": "samples/sample_02586-f3a6fd08/mask.png",
+      "trajectory": "samples/sample_02586-f3a6fd08/trajectory.npz",
+      "frames": {
+        "6": "samples/sample_02586-f3a6fd08/step_006.png",
+        "12": "samples/sample_02586-f3a6fd08/step_012.png",
+        "18": "samples/sample_02586-f3a6fd08/step_018.png",
+        "24": "samples/sample_02586-f3a6fd08/step_024.png",
+        "30": "samples/sample_02586-f3a6fd08/step_030.png",
+        "36": "samples/sample_02586-f3a6fd08/step_036.png"
+      },
+      "edit_fraction": 0.08154296875,
+      "edit_type": "Text Editing",
+      "artifact_sha256": {
+        "samples/sample_02586-f3a6fd08/source.png": "7a11c97135552ac95f79fb5c5fbb9b91c2029f25fe2a7fc1952fdf5e9631f8db",
+        "samples/sample_02586-f3a6fd08/mask.png": "0f24b1b43cf31c95fc5108b053e538a28957e66e56a72dba29167e7aa56e8c65",
+        "samples/sample_02586-f3a6fd08/trajectory.npz": "088f44c2486530afdf39b864f3b235d92f8b3722721f95ee8f645ecb5a5c6aba",
+        "samples/sample_02586-f3a6fd08/instruction.txt": "3d6489a50ce7df0635a43f106741cca5908477b4239d2a866f29329f39026238",
+        "samples/sample_02586-f3a6fd08/step_006.png": "985d631b225cf7e126f9d356b254f4245328fe6358527e20321b907ba7cb290e",
+        "samples/sample_02586-f3a6fd08/step_012.png": "e052a09854ee93796a4a2223209daa61a3f7eb7f768bc92fb99f3a0f81cd7aa3",
+        "samples/sample_02586-f3a6fd08/step_018.png": "a32c4ea9204d3c6ba1b5590d96515697d31e312a82162640ce18aca619c5d2e7",
+        "samples/sample_02586-f3a6fd08/step_024.png": "e58bded4c9f8be540fc4ffa5129e0740d78fdbce33906e2cf3f1ef1bdff310f8",
+        "samples/sample_02586-f3a6fd08/step_030.png": "e1f5f8491d86d32ee68efb44803711453f34d562f6b664875e7e2b31a095296d",
+        "samples/sample_02586-f3a6fd08/step_036.png": "b33851ab0c5c682756fa99d7b025194b4031b1b4fc650b75c2198245ec520729"
+      },
+      "inputs": {
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/02586_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/02586_mask.png"
+        }
+      }
+    },
+    {
+      "key": "sample_04330",
+      "instruction": "Add the text \"Vintage elegance\" in a subtle brown color.",
+      "seed": 6538502369498135481,
+      "directory": "samples/sample_04330-40f11742",
+      "source": "samples/sample_04330-40f11742/source.png",
+      "mask": "samples/sample_04330-40f11742/mask.png",
+      "trajectory": "samples/sample_04330-40f11742/trajectory.npz",
+      "frames": {
+        "6": "samples/sample_04330-40f11742/step_006.png",
+        "12": "samples/sample_04330-40f11742/step_012.png",
+        "18": "samples/sample_04330-40f11742/step_018.png",
+        "24": "samples/sample_04330-40f11742/step_024.png",
+        "30": "samples/sample_04330-40f11742/step_030.png",
+        "36": "samples/sample_04330-40f11742/step_036.png"
+      },
+      "edit_fraction": 0.054931640625,
+      "edit_type": "Text Editing",
+      "artifact_sha256": {
+        "samples/sample_04330-40f11742/source.png": "f5afc77f193df25d5be3ac5f6f759146baac939c48a44d93c500ad2d09599ccc",
+        "samples/sample_04330-40f11742/mask.png": "3098cc34577667890449bd7c17295bd37f43f974174c1d7606938d0c591eda6c",
+        "samples/sample_04330-40f11742/trajectory.npz": "f7558d05baf472fb2ef127f74e121ad5d66f94a80ae2a574c3ee12495dd28364",
+        "samples/sample_04330-40f11742/instruction.txt": "2806bfa2cb4309aff43331a61ef740054a099daf354c9c828924afe8a031e070",
+        "samples/sample_04330-40f11742/step_006.png": "2eb17b3c12c500a8f5cb34b451dfc0b7a7e7cfe6688523d06d16c39f557d68cb",
+        "samples/sample_04330-40f11742/step_012.png": "1acc1053b02581f1b81ab335b8c39ae54df952638497f46759b3047ce84b6f7f",
+        "samples/sample_04330-40f11742/step_018.png": "89b5636b89da01c9a468cae21a7adb3259c1ca4d28889e3b0dbb9b9f099b611e",
+        "samples/sample_04330-40f11742/step_024.png": "c1d45396de25c3864bf1407506add256c7dd017155844bf88021bd56a47cd390",
+        "samples/sample_04330-40f11742/step_030.png": "b305f706a54f849b2a66720a725a2124e2572ac960f2ea1fe5b5c2a012a906d4",
+        "samples/sample_04330-40f11742/step_036.png": "a6a21aabe0be364dbaf49d2963266fa2bf81316fe7d3ef910cad5e4fd6c7fb75"
+      },
+      "inputs": {
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/04330_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/04330_mask.png"
+        }
+      }
+    },
+    {
+      "key": "sample_02832",
+      "instruction": "Replace black suspenders with red ones.",
+      "seed": 4150653438192935482,
+      "directory": "samples/sample_02832-16407f69",
+      "source": "samples/sample_02832-16407f69/source.png",
+      "mask": "samples/sample_02832-16407f69/mask.png",
+      "trajectory": "samples/sample_02832-16407f69/trajectory.npz",
+      "frames": {
+        "6": "samples/sample_02832-16407f69/step_006.png",
+        "12": "samples/sample_02832-16407f69/step_012.png",
+        "18": "samples/sample_02832-16407f69/step_018.png",
+        "24": "samples/sample_02832-16407f69/step_024.png",
+        "30": "samples/sample_02832-16407f69/step_030.png",
+        "36": "samples/sample_02832-16407f69/step_036.png"
+      },
+      "edit_fraction": 0.342529296875,
+      "edit_type": "Local",
+      "artifact_sha256": {
+        "samples/sample_02832-16407f69/source.png": "aadc14482916a6fc7f825711bcb59dad791a6efb11878a542e5e94ed519db92b",
+        "samples/sample_02832-16407f69/mask.png": "920ad700e91ee1926b5a5a512607636fc14c60acddd7aee7f896162d19cd58f7",
+        "samples/sample_02832-16407f69/trajectory.npz": "66092f1d3527edb87722505d5b6d78746b40a0bf938345177600daab027fcded",
+        "samples/sample_02832-16407f69/instruction.txt": "c73bf91d91c7d581d2887f89fd92b1cab1b091818e8245782f308587f42fef1b",
+        "samples/sample_02832-16407f69/step_006.png": "540b023f5d6503a5744038c4b0052311167b1b2e9830bee393260b6551de2548",
+        "samples/sample_02832-16407f69/step_012.png": "1c4026156169291c85d8a46ffc0fd008bc68ae657020bbc988c0f89d5a90fa5e",
+        "samples/sample_02832-16407f69/step_018.png": "99553a029eae13a4243c26abf265a9e8a593535510a404f165e29b72d857bcdb",
+        "samples/sample_02832-16407f69/step_024.png": "7d6b89c761754876c49a0f577361bd3809f4d8e8f988a21ccd65199567faa57d",
+        "samples/sample_02832-16407f69/step_030.png": "6913133ee5de9077e067f2bd548cee2f878b7c3d05a806ed9d9164e3c95abd50",
+        "samples/sample_02832-16407f69/step_036.png": "ae01b9ec8894488a6532526a1823ee4ea894c67feb157d4ae8e2212ca9ed2c27"
+      },
+      "inputs": {
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/02832_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/02832_mask.png"
+        }
+      }
+    },
+    {
+      "key": "sample_04776",
+      "instruction": "Replace the black T-shirt with a white T-shirt.",
+      "seed": 7980462536248759514,
+      "directory": "samples/sample_04776-429d9429",
+      "source": "samples/sample_04776-429d9429/source.png",
+      "mask": "samples/sample_04776-429d9429/mask.png",
+      "trajectory": "samples/sample_04776-429d9429/trajectory.npz",
+      "frames": {
+        "6": "samples/sample_04776-429d9429/step_006.png",
+        "12": "samples/sample_04776-429d9429/step_012.png",
+        "18": "samples/sample_04776-429d9429/step_018.png",
+        "24": "samples/sample_04776-429d9429/step_024.png",
+        "30": "samples/sample_04776-429d9429/step_030.png",
+        "36": "samples/sample_04776-429d9429/step_036.png"
+      },
+      "edit_fraction": 0.33154296875,
+      "edit_type": "Local",
+      "artifact_sha256": {
+        "samples/sample_04776-429d9429/source.png": "2fae2aacc48a3d02a712368c94998bc663302d5ec075a31b3603458e720e5ac6",
+        "samples/sample_04776-429d9429/mask.png": "89142de29ba2f27152eff8d8d14f6156f315973aa67399780af9cc11dba9e04c",
+        "samples/sample_04776-429d9429/trajectory.npz": "f9a03b0eabbf5976a9390012124fe56e7847a27c9429b95e6b26e133e9939f01",
+        "samples/sample_04776-429d9429/instruction.txt": "2a52bbfef0f3cbd0d03d5e732d875757e06517c68da5e52ca49503a4c17fe252",
+        "samples/sample_04776-429d9429/step_006.png": "adca43350ad3367bee44da48eaaff4a76390f609280dde357a2bcf0c8f4a862f",
+        "samples/sample_04776-429d9429/step_012.png": "31cb677b506a2d3801fa439ee8cf1308074daf8bedcd288d6697b4ea7ac7ffc8",
+        "samples/sample_04776-429d9429/step_018.png": "89daab0afebb81dccb0d996b0c42ea3c121ebce31278446e451a49f3b989f7af",
+        "samples/sample_04776-429d9429/step_024.png": "bb203a70e8f315a1975bd88fc7c93304f3ec59a5a9de5f81e3ffe068621ec047",
+        "samples/sample_04776-429d9429/step_030.png": "96665097aecd5712263453613869b48221c09f3fc03c050a6b0a6a27d342db18",
+        "samples/sample_04776-429d9429/step_036.png": "6d48930ed52f54bbb056fadeb139079f08ad283c2cf291f201d9bf887adf4c17"
+      },
+      "inputs": {
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/04776_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/04776_mask.png"
+        }
+      }
+    },
+    {
+      "key": "sample_02168",
+      "instruction": "Add a vase with colorful flowers",
+      "seed": 4061117027793754154,
+      "directory": "samples/sample_02168-37c382ac",
+      "source": "samples/sample_02168-37c382ac/source.png",
+      "mask": "samples/sample_02168-37c382ac/mask.png",
+      "trajectory": "samples/sample_02168-37c382ac/trajectory.npz",
+      "frames": {
+        "6": "samples/sample_02168-37c382ac/step_006.png",
+        "12": "samples/sample_02168-37c382ac/step_012.png",
+        "18": "samples/sample_02168-37c382ac/step_018.png",
+        "24": "samples/sample_02168-37c382ac/step_024.png",
+        "30": "samples/sample_02168-37c382ac/step_030.png",
+        "36": "samples/sample_02168-37c382ac/step_036.png"
+      },
+      "edit_fraction": 0.0595703125,
+      "edit_type": "Add",
+      "artifact_sha256": {
+        "samples/sample_02168-37c382ac/source.png": "51f7e93a9bddc7b7c4a121a774aa820e846c1d9402ee3e0197178cafb3b4799a",
+        "samples/sample_02168-37c382ac/mask.png": "3f96ae12faae64a8dfa6b00c4a9456d95c67e5e5069e05ff52fca2b2cef33a64",
+        "samples/sample_02168-37c382ac/trajectory.npz": "8ce817d3c7f086bd5054c153c1e05911748ad46e1b4fb01b04a6e5b8870f5dad",
+        "samples/sample_02168-37c382ac/instruction.txt": "292f885c9aaa5757255c39e30a5e34a1a1cf4903c8e9f85dd92fda906e45a8e1",
+        "samples/sample_02168-37c382ac/step_006.png": "b654e18bdcb461c87bf21998b3810eeac7e877c4077e4a684479164fd9653137",
+        "samples/sample_02168-37c382ac/step_012.png": "6e36c5b008ca6e56ca0e6aaeb1fe9b44d8c0aadec028a14a0ae9e0ea5302138d",
+        "samples/sample_02168-37c382ac/step_018.png": "0fc3915446763493a86fa910fe4e2b570ccd4c111ad1b0a8a1faf6c89cc2b5d6",
+        "samples/sample_02168-37c382ac/step_024.png": "006631a652841680d3993450e69303d205088d60761745ad488673e8920ff9cd",
+        "samples/sample_02168-37c382ac/step_030.png": "01df2df919eb3f5c440dedb9f46d405a8a346584873742a064ef978b6e64ba66",
+        "samples/sample_02168-37c382ac/step_036.png": "ab5d0a3f4bf238fb7927b39487ee17b7baf7cb34cc6662c74d1b0c9cc62f8499"
+      },
+      "inputs": {
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/02168_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/02168_mask.png"
+        }
+      }
+    },
+    {
+      "key": "sample_03987",
+      "instruction": "add the text \"Emergency Response\" above",
+      "seed": 1101007069905496033,
+      "directory": "samples/sample_03987-089a24de",
+      "source": "samples/sample_03987-089a24de/source.png",
+      "mask": "samples/sample_03987-089a24de/mask.png",
+      "trajectory": "samples/sample_03987-089a24de/trajectory.npz",
+      "frames": {
+        "6": "samples/sample_03987-089a24de/step_006.png",
+        "12": "samples/sample_03987-089a24de/step_012.png",
+        "18": "samples/sample_03987-089a24de/step_018.png",
+        "24": "samples/sample_03987-089a24de/step_024.png",
+        "30": "samples/sample_03987-089a24de/step_030.png",
+        "36": "samples/sample_03987-089a24de/step_036.png"
+      },
+      "edit_fraction": 0.166259765625,
+      "edit_type": "Text Editing",
+      "artifact_sha256": {
+        "samples/sample_03987-089a24de/source.png": "4196e97c5d694f870f9596fc5424ef5175c24955c8c66f9edf85bb05c2d1d237",
+        "samples/sample_03987-089a24de/mask.png": "2e49d137751a7fed4a19b6bb2a3c6a9cf6c39c29609c903d8771303dc5e026e2",
+        "samples/sample_03987-089a24de/trajectory.npz": "fd8fdc4c3cc8468e1851b4e0ff0080e7112ccebeb493810b85d1a611c47d04d0",
+        "samples/sample_03987-089a24de/instruction.txt": "ec7345031796a5c6f312059f3284b9c80c30123cf26356586bce096241400206",
+        "samples/sample_03987-089a24de/step_006.png": "f170a2148c0b488a3379a1064e64f5865bd9a922a2636da0cc07d1ca0c36e090",
+        "samples/sample_03987-089a24de/step_012.png": "899a5615cb7beb20cfb2f8d3e6584f3250d026842c402c7440444592ed099779",
+        "samples/sample_03987-089a24de/step_018.png": "48ba56c03a08cfa3dffbbbb17adad7b5efec47155b58cb707c3cad5a270005d3",
+        "samples/sample_03987-089a24de/step_024.png": "1a91c6af1d8e221bc198904181ea5bbe86f26d337d5f2ffd11a6747a0e22c642",
+        "samples/sample_03987-089a24de/step_030.png": "9c81db4a5a54517d6f8d48bcab9ec3ff806afe6911e8e511d111901084c43210",
+        "samples/sample_03987-089a24de/step_036.png": "48392f1a8c5a4318e5abb71b9171722e185f531c7aef411c7add30c9429489b5"
+      },
+      "inputs": {
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/03987_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/03987_mask.png"
+        }
+      }
+    },
+    {
+      "key": "sample_02431",
+      "instruction": "Add a beach umbrella.",
+      "seed": 3071844236692836313,
+      "directory": "samples/sample_02431-91c58e52",
+      "source": "samples/sample_02431-91c58e52/source.png",
+      "mask": "samples/sample_02431-91c58e52/mask.png",
+      "trajectory": "samples/sample_02431-91c58e52/trajectory.npz",
+      "frames": {
+        "6": "samples/sample_02431-91c58e52/step_006.png",
+        "12": "samples/sample_02431-91c58e52/step_012.png",
+        "18": "samples/sample_02431-91c58e52/step_018.png",
+        "24": "samples/sample_02431-91c58e52/step_024.png",
+        "30": "samples/sample_02431-91c58e52/step_030.png",
+        "36": "samples/sample_02431-91c58e52/step_036.png"
+      },
+      "edit_fraction": 0.271240234375,
+      "edit_type": "Add",
+      "artifact_sha256": {
+        "samples/sample_02431-91c58e52/source.png": "954cb6e340a089d1ea69192b48db89f22c2a55377d832fb1f60021d638cdbec0",
+        "samples/sample_02431-91c58e52/mask.png": "6a76cd591b148580d832b00c978a41ca16389e3b12e013c60eb3c0803ae27d79",
+        "samples/sample_02431-91c58e52/trajectory.npz": "6c75a4ea6d006d35381b300905d22fd3061f86d643f4917245cc5c0c0b34caf1",
+        "samples/sample_02431-91c58e52/instruction.txt": "118d469c3c435312d83cd776310586068caac1509f4769fba4f62373206859cf",
+        "samples/sample_02431-91c58e52/step_006.png": "d68221313bcafb0baa9b0d6c343cd17cd14c4b51e5fb46edca50c9669b1c8d53",
+        "samples/sample_02431-91c58e52/step_012.png": "612bcb98da87713efe64bdcf63f8c444d77af078933e2ccaf5365ce69fe17acc",
+        "samples/sample_02431-91c58e52/step_018.png": "515cfbcaa9f64631c2ed51a73518c9d4e8d0c1bdd2e05cb83b58907b3cb775a0",
+        "samples/sample_02431-91c58e52/step_024.png": "2d8f1ce32a66b0c7cd15f34012abcb675c21f69df51e31a8cc10d3cc228b5353",
+        "samples/sample_02431-91c58e52/step_030.png": "fe9b89aa116947af3aa60d6719dfb262528f351426e3b635be53ac3df937232c",
+        "samples/sample_02431-91c58e52/step_036.png": "bdbc216fc2727dc462b519f6d667a13e9ae3dc1dc4c43a51746de4ecbe6701ab"
+      },
+      "inputs": {
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/02431_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/02431_mask.png"
+        }
+      }
+    },
+    {
+      "key": "sample_05134",
+      "instruction": "Insert a glowing moon.",
+      "seed": 2348485059645204056,
+      "directory": "samples/sample_05134-788c2db4",
+      "source": "samples/sample_05134-788c2db4/source.png",
+      "mask": "samples/sample_05134-788c2db4/mask.png",
+      "trajectory": "samples/sample_05134-788c2db4/trajectory.npz",
+      "frames": {
+        "6": "samples/sample_05134-788c2db4/step_006.png",
+        "12": "samples/sample_05134-788c2db4/step_012.png",
+        "18": "samples/sample_05134-788c2db4/step_018.png",
+        "24": "samples/sample_05134-788c2db4/step_024.png",
+        "30": "samples/sample_05134-788c2db4/step_030.png",
+        "36": "samples/sample_05134-788c2db4/step_036.png"
+      },
+      "edit_fraction": 0.033447265625,
+      "edit_type": "Add",
+      "artifact_sha256": {
+        "samples/sample_05134-788c2db4/source.png": "db1d69c9b127787658ab6350b6940263aa43e591a8a572eb0ff5bad2a7b7fe3a",
+        "samples/sample_05134-788c2db4/mask.png": "05c2e83a44309b94c365059252bf6ea50ab4f1e62d0beec2e1d3bb86425db582",
+        "samples/sample_05134-788c2db4/trajectory.npz": "fa2ce1fde300ff44661f3294babdd6fe78695b14bc8e6d0e8bc01ee02fb75618",
+        "samples/sample_05134-788c2db4/instruction.txt": "167904df3b0b409a0abf4325b4e0ba269144e6b65021141fac1cfc85fa71f144",
+        "samples/sample_05134-788c2db4/step_006.png": "85f3fbbffe67830996d3e169b0c6a6a8c6e64ba6f1c06132759a3ca73537b051",
+        "samples/sample_05134-788c2db4/step_012.png": "dd2d5e56470d783448d93ece795d09bc8e02ab5dd4317889ae040ae98348d490",
+        "samples/sample_05134-788c2db4/step_018.png": "131882cf6b8ab8c35f7a18a20f1754e90c97774f0eedb09222b254f19882f862",
+        "samples/sample_05134-788c2db4/step_024.png": "947ccf7c6a8043cbb8703e4987da8757d3e594da5cb27305b3dbae167bb91241",
+        "samples/sample_05134-788c2db4/step_030.png": "ec3050df45618c712dc4a2dfdefaddfd2fe7a5ec3ce5b5e8023c2ef7ecd0050f",
+        "samples/sample_05134-788c2db4/step_036.png": "5840ee2ab4e49cb1470093b11828b714a9da02cb6e901b5295d7288a7316c364"
+      },
+      "inputs": {
+        "source": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "source_images.tar",
+          "member": "source_images/05134_source.jpg"
+        },
+        "mask": {
+          "kind": "tar",
+          "root": "/mnt/geminihzceph/public/data/Inter-Edit/test",
+          "archive": "masks.tar",
+          "member": "masks/05134_mask.png"
+        }
+      }
+    }
+  ],
+  "skipped": [],
+  "default_visual_sample": "sample_02832",
+  "visual_selection": "first Local task with mask area in [3%,35%], else first example; independent of model outputs"
+}

@@ -4,7 +4,7 @@
 
 - 基模型：`runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/checkpoint-8000`，18 步、CFG=6；采用 checkpoint 训练的低噪声条件缓存，阈值 0.8。
 - 蒸馏模型：`runs/region_dimo_v3_inter_brush_maskedit_bs256/checkpoint-4000` 的 EMA 导出；1 步使用独立 categorical 采样且无缓存，2/4 步使用 cosine MaskGIT 式迭代及 context K/V cache，CFG=1。
-- **速度基线**：发布版 `checkpoint/EditMGT/editmgt`（vanilla EditMGT），36 步、CFG=6、reference strength=1.1、发布版默认 negative prompt、mask-free、无 KV cache；仅用于速度比较，未将它混入 SFT/DiMO 的质量表。
+- **速度基线**：发布版 `checkpoint/EditMGT/editmgt`（vanilla EditMGT），36 步、CFG=6、reference strength=1.1、发布版默认 negative prompt、mask-free、无 KV cache；仅用于速度比较，质量表中保留模型行但对应分数留空。
 - 2/4 步在首个 forward 捕获 context，此时 mask ratio=1，高于训练的 0.8 缓存阶段；后续分别重用 1/3 次。这是**近似的提前缓存**，不能称为严格等价的低噪声缓存。每张图的实际缓存元数据见 `records/*.json`。
 - SFT 与 DiMO 质量评测采用相同的原始标注 mask、1024 分辨率、BF16、seed 42、8 张 H20、直接 VQ 解码且不做源图像素合成；vanilla 速度评测使用同样的硬件、分辨率、精度和 seed，但遵循其原生 mask-free 推理协议。
 - MagicBrush 使用 dev 和 test 集的 single/multi both 模式；Inter-Edit 使用完整英文 test 子集；PIE-Bench 使用 v1 全集。基准计分样本在四种方法间逐条对齐。
@@ -50,38 +50,59 @@
 | DiMO EMA-4000 · 2 steps + cache | 0.8728 | 0.7965 | 0.1060 | 0.0403 |
 | DiMO EMA-4000 · 4 steps + cache | 0.8703 | 0.7910 | 0.1069 | 0.0412 |
 
-### Inter-Edit test/en
+### Inter-Edit test/en 与 PIE-Bench v1
 
-两条空 mask 注释在各方法中一致跳过；计分数见覆盖率。
+Inter-Edit 的两条空 mask 注释在各方法中一致跳过，实际计分 3,411 张。PIE-Bench 没有编辑后 GT；Target CLIP 使用目标文本描述，Structure Distance 以源图为参考。PIE 未编辑区指标的有效样本数以原始 summary 的 `count/undefined_count` 为准；无未编辑像素的样本不进入对应均值。空白单元格表示当前没有查到对应质量分数。
 
-| Model | LPIPS ↓ | AlphaCLIP-in ↑ | AlphaCLIP-out ↑ | BSS ↓ |
-| --- | ---: | ---: | ---: | ---: |
-| EditMGT SFT-8000 · 18 steps | 0.2259 | 0.9603 | 0.9736 | 4.6028 |
-| DiMO EMA-4000 · 1 step | 0.2468 | 0.9549 | 0.9685 | 6.4444 |
-| DiMO EMA-4000 · 2 steps + cache | 0.2465 | 0.9551 | 0.9676 | 6.7314 |
-| DiMO EMA-4000 · 4 steps + cache | 0.2474 | 0.9541 | 0.9660 | 7.1214 |
-
-### PIE-Bench v1：编辑对齐及结构（n=700）
-
-PIE-Bench 没有编辑后 GT；Target CLIP 使用目标文本描述，Structure Distance 以源图为参考。
-
-| Model | Target CLIP ↑ | Edit-part Target CLIP ↑ | Structure Distance ↓ |
-| --- | ---: | ---: | ---: |
-| EditMGT SFT-8000 · 18 steps | 25.3861 | 21.8593 | 0.0684 |
-| DiMO EMA-4000 · 1 step | 25.5202 | 22.0148 | 0.0643 |
-| DiMO EMA-4000 · 2 steps + cache | 25.5306 | 22.1097 | 0.0650 |
-| DiMO EMA-4000 · 4 steps + cache | 25.3743 | 21.9131 | 0.0660 |
-
-### PIE-Bench v1：未编辑区域保留
-
-下表每个指标的有效样本数请以原始 summary 的 `count/undefined_count` 为准；无未编辑像素的样本不会进入相应均值。
-
-| Model | PSNR ↑ | LPIPS ↓ | MSE ↓ | SSIM ↑ |
-| --- | ---: | ---: | ---: | ---: |
-| EditMGT SFT-8000 · 18 steps | 28.2630 | 0.0463 | 0.002310 | 0.8785 |
-| DiMO EMA-4000 · 1 step | 24.1317 | 0.0644 | 0.008181 | 0.8568 |
-| DiMO EMA-4000 · 2 steps + cache | 24.0364 | 0.0645 | 0.008365 | 0.8574 |
-| DiMO EMA-4000 · 4 steps + cache | 23.9858 | 0.0646 | 0.008532 | 0.8583 |
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">Model</th>
+      <th colspan="4">Inter-Edit test/en (n=3,411)</th>
+      <th colspan="7">PIE-Bench v1 (n=700)</th>
+    </tr>
+    <tr>
+      <th>LPIPS ↓</th>
+      <th>AlphaCLIP-in ↑</th>
+      <th>AlphaCLIP-out ↑</th>
+      <th>BSS ↓</th>
+      <th>Target CLIP ↑</th>
+      <th>Edit-part Target CLIP ↑</th>
+      <th>Structure Distance ↓</th>
+      <th>PSNR ↑</th>
+      <th>LPIPS ↓</th>
+      <th>MSE ↓</th>
+      <th>SSIM ↑</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Vanilla EditMGT · 36 steps</td>
+      <td></td><td></td><td></td><td></td>
+      <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
+    </tr>
+    <tr>
+      <td>EditMGT SFT-8000 · 18 steps</td>
+      <td>0.2259</td><td>0.9603</td><td>0.9736</td><td>4.6028</td>
+      <td>25.3861</td><td>21.8593</td><td>0.0684</td><td>28.2630</td><td>0.0463</td><td>0.002310</td><td>0.8785</td>
+    </tr>
+    <tr>
+      <td>DiMO EMA-4000 · 1 step</td>
+      <td>0.2468</td><td>0.9549</td><td>0.9685</td><td>6.4444</td>
+      <td>25.5202</td><td>22.0148</td><td>0.0643</td><td>24.1317</td><td>0.0644</td><td>0.008181</td><td>0.8568</td>
+    </tr>
+    <tr>
+      <td>DiMO EMA-4000 · 2 steps + cache</td>
+      <td>0.2465</td><td>0.9551</td><td>0.9676</td><td>6.7314</td>
+      <td>25.5306</td><td>22.1097</td><td>0.0650</td><td>24.0364</td><td>0.0645</td><td>0.008365</td><td>0.8574</td>
+    </tr>
+    <tr>
+      <td>DiMO EMA-4000 · 4 steps + cache</td>
+      <td>0.2474</td><td>0.9541</td><td>0.9660</td><td>7.1214</td>
+      <td>25.3743</td><td>21.9131</td><td>0.0660</td><td>23.9858</td><td>0.0646</td><td>0.008532</td><td>0.8583</td>
+    </tr>
+  </tbody>
+</table>
 
 ## 速度对比
 
@@ -117,6 +138,10 @@ PIE-Bench 没有编辑后 GT；Target CLIP 使用目标文本描述，Structure 
 - 官方 MagicBrush test 单轮 CLIP-I：SFT 0.9315，DiMO 1/2/4 步 0.9213/0.9202/0.9170；多轮最终 CLIP-I：SFT 0.8924，DiMO 1 步 0.8757。
 - PIE-Bench 的 DiMO 1 步目标文本 CLIP 为 25.5202，SFT 为 25.3861；未编辑区 PSNR 分别为 24.13 与 28.26 dB。文本对齐与背景保留不能用单一指标概括。
 - 当前 2/4 步近似缓存设置未在 MagicBrush dev 单轮 CLIP-I 上改善 1 步结果（1/2/4 步分别为 0.9281/0.9262/0.9233）；它们增加延迟，其他指标的变化见表格。
+
+## Qualitative results
+
+从 Inter-Edit `test/en` 中筛选了 12 个 DiMO EMA-4000 1-step 定性案例，覆盖 Add、Local、Remove 和 Texture 四类编辑。每个案例的 source、mask、source-mask overlay、edited image 和 instruction 均以独立文件保存，见 [qualitative results](qualitative_results/README.md)。这些是筛选后的展示案例，不代表整个测试集的平均质量。
 
 ## Inter-Edit 训练集可视化素材
 
