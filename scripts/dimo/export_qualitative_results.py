@@ -24,6 +24,18 @@ EDIT_TYPES = ("Add", "Local", "Remove", "Texture")
 HAN = re.compile("[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
+def safe_exif_transpose(image):
+    try:
+        return ImageOps.exif_transpose(image)
+    except (SyntaxError, ValueError):
+        if "exif" not in image.info:
+            raise
+        clean = image.copy()
+        clean.info.pop("exif", None)
+        clean._exif = None
+        return ImageOps.exif_transpose(clean)
+
+
 def load_rows(path):
     with path.open(encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
@@ -87,7 +99,7 @@ class AssetStore:
 
 
 def normalize_mask(mask, size=None):
-    mask = ImageOps.exif_transpose(mask).convert("L")
+    mask = safe_exif_transpose(mask).convert("L")
     threshold = 1 if mask.getextrema()[1] <= 1 else 128
     mask = mask.point(lambda value: 255 if value >= threshold else 0)
     if size is not None and mask.size != size:
@@ -101,7 +113,7 @@ def mask_ratio(mask):
 
 
 def overlay(source, mask):
-    source = ImageOps.exif_transpose(source).convert("RGB")
+    source = safe_exif_transpose(source).convert("RGB")
     mask = normalize_mask(mask, source.size)
     red = Image.new("RGB", source.size, (255, 35, 35))
     alpha = mask.point(lambda value: 112 if value else 0)
@@ -209,7 +221,7 @@ def save_preview(rows, assets, prediction_root, output_dir):
     )
 
 
-def export(rows, keys, assets, prediction_root, output_dir):
+def export(rows, keys, assets, prediction_root, output_dir, resume=False):
     by_key = {row["key"]: row for row in rows}
     unknown = [key for key in keys if key not in by_key]
     if unknown:
@@ -220,17 +232,27 @@ def export(rows, keys, assets, prediction_root, output_dir):
         row = by_key[key]
         name = f"{number:02d}_{row['edit_type'].lower()}_{key}"
         folder = output_dir / name
+        artifacts = ("source.png", "mask.png", "source_mask_overlay.png", "edited.png",
+                     "target.png", "instruction.txt")
         if folder.exists() and any(folder.iterdir()):
-            raise FileExistsError(f"Output folder is nonempty: {folder}")
-        folder.mkdir(parents=True, exist_ok=True)
-        source = ImageOps.exif_transpose(assets.image(row["source"])).convert("RGB")
-        mask = normalize_mask(assets.image(row["mask"]), source.size)
-        source.save(folder / "source.png")
-        mask.save(folder / "mask.png")
-        overlay(source, mask).save(folder / "source_mask_overlay.png")
-        with Image.open(prediction_path(row, prediction_root)) as prediction:
-            ImageOps.exif_transpose(prediction).convert("RGB").save(folder / "edited.png")
-        (folder / "instruction.txt").write_text(row["instruction"] + "\n", encoding="utf-8")
+            if not resume or not all((folder / artifact).is_file() for artifact in artifacts):
+                raise FileExistsError(f"Output folder is nonempty or incomplete: {folder}")
+            if (folder / "instruction.txt").read_text(encoding="utf-8") != row["instruction"] + "\n":
+                raise ValueError(f"Existing instruction differs: {folder}")
+            with Image.open(folder / "mask.png") as saved_mask:
+                ratio = mask_ratio(saved_mask)
+        else:
+            folder.mkdir(parents=True, exist_ok=True)
+            source = safe_exif_transpose(assets.image(row["source"])).convert("RGB")
+            mask = normalize_mask(assets.image(row["mask"]), source.size)
+            source.save(folder / "source.png")
+            mask.save(folder / "mask.png")
+            overlay(source, mask).save(folder / "source_mask_overlay.png")
+            safe_exif_transpose(assets.image(row["target"])).convert("RGB").save(folder / "target.png")
+            with Image.open(prediction_path(row, prediction_root)) as prediction:
+                safe_exif_transpose(prediction).convert("RGB").save(folder / "edited.png")
+            (folder / "instruction.txt").write_text(row["instruction"] + "\n", encoding="utf-8")
+            ratio = mask_ratio(mask)
         metrics = row["metrics"]
         manifest.append(
             {
@@ -243,17 +265,20 @@ def export(rows, keys, assets, prediction_root, output_dir):
                 "mask": f"{name}/mask.png",
                 "source_mask_overlay": f"{name}/source_mask_overlay.png",
                 "edited": f"{name}/edited.png",
+                "target": f"{name}/target.png",
                 "instruction_file": f"{name}/instruction.txt",
-                "mask_ratio": mask_ratio(mask),
+                "mask_ratio": ratio,
                 "metrics": metrics,
                 "model": "DiMO EMA-4000, 1 step",
                 "benchmark": "Inter-Edit test/en",
             }
         )
-    (output_dir / "manifest.json").write_text(
-        json.dumps({"samples": manifest}, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+        (output_dir / "manifest.json").write_text(
+            json.dumps({"samples": manifest}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        if number % 25 == 0 or number == len(keys):
+            print(f"Exported {number}/{len(keys)} qualitative samples", flush=True)
 
 
 def main():
