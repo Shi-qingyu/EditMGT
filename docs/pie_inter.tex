@@ -1,0 +1,63 @@
+% Sources and local evaluation: third_party/table_completion/provenance.md and
+% docs/dimo_step4000_sft8000_results.md.
+% Baselines follow the same three-category organization as MagicBrush.
+% Sampling configurations follow their cited releases; N/R marks scores not
+% reported or measured under the stated PIE-Bench and Inter-Edit protocols.
+% Latencies: matched-key PIE-Bench/Inter-Edit timing in the Ours source above.
+% DICE/GIDE: user-provided Table 1, PIE-Bench quality metrics; timings await remeasurement.
+% Undo source scaling: Dist./LPIPS/SSIM divided by 100; MSE divided by 1000.
+\begin{table*}[!t]
+    \centering
+    \caption{\textbf{Quantitative comparison on PIE-Bench and Inter-Edit.}
+    Latency lists inference time in PIE-Bench/Inter-Edit order
+    (Sec.~\ref{sec:efficiency}). Published Inter-Edit scores use the full test set;
+    locally evaluated EditMGT and Ours use the English subset.
+    Real-time rows with numeric scores use local full-split evaluation.
+    DICE and GIDE use source-reported PIE-Bench quality results.
+    SpotEdit uses a four-step FLUX.2 Klein 4B adaptation.
+    $\dagger$: steps exclude SwiftEdit inversion and ChordEdit proximal refinement.
+    N/R indicates unavailable results.}
+    \label{tab:pie_interedit_main}
+    \small
+    \setlength{\tabcolsep}{2pt}
+    \begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}lc*{12}{c}@{}}
+        \toprule
+        & & & \multicolumn{7}{c}{PIE-Bench} & \multicolumn{4}{c}{Inter-Edit} \\
+        \cmidrule(lr){4-10} \cmidrule(lr){11-14}
+        & & & \multicolumn{2}{c}{Text alignment} &
+        & \multicolumn{4}{c}{Background} & & \multicolumn{2}{c}{AlphaCLIP} & \\
+        \cmidrule(lr){4-5} \cmidrule(lr){7-10} \cmidrule(lr){12-13}
+        Method & Steps & \shortstack{Latency$\downarrow$\\(s/image)}
+        & Target$\uparrow$ & Edit$\uparrow$ & Struct.$\downarrow$
+        & PSNR$\uparrow$ & LPIPS$\downarrow$ & MSE$\downarrow$ & SSIM$\uparrow$
+        & LPIPS$\downarrow$ & $S_{\mathrm{in}}\uparrow$ & $S_{\mathrm{out}}\uparrow$ & BSS$\downarrow$ \\
+        \midrule
+        \multicolumn{14}{@{}l}{\textit{End-to-end image editing models}} \\
+        MMaDA-Parallel~\cite{mmadaparallel2025} & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R \\
+        Lumina-DiMOO~\cite{luminadimoo2025} & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R \\
+        EditMGT~\cite{editmgt2026} & 36 & 4.6/4.5 & 25.49 & 22.10 & 0.0654 & 21.73 & 0.1206 & 0.0177 & 0.7925 & 0.3268 & 0.9438 & 0.9546 & 4.75 \\
+        \midrule
+        \multicolumn{14}{@{}l}{\textit{Instruction-based image editing models}} \\
+        DiffEdit~\cite{diffedit2023} & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R \\
+        InstructPix2Pix~\cite{instructpix2pix2023} & N/R & N/R & 23.61 & 21.64 & 0.0579 & 20.82 & 0.1586 & 0.0228 & 0.7626 & 0.37 & 0.91 & 0.94 & 11 \\
+        UltraEdit~\cite{ultraedit2024} & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R \\
+        DICE~\cite{dice2024} & N/R & N/R & 24.70 & 21.76 & 0.1784 & 9.01 & 0.4889 & 0.16070 & 0.4700 & N/R & N/R & N/R & N/R \\
+        GIDE~\cite{gide2026} & N/R & N/R & 24.70 & 22.17 & 0.0384 & 24.37 & 0.0786 & 0.00836 & 0.7924 & N/R & N/R & N/R & N/R \\
+        Inter-Edit--RNI~\cite{interedit2026} & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & 0.19 & 0.98 & 0.97 & 10 \\
+        Inter-Edit--CJT~\cite{interedit2026} & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & 0.24 & 0.98 & 0.96 & 5.4 \\
+        \midrule
+        \multicolumn{14}{@{}l}{\textit{Real-time image editing models}} \\
+        SpotEdit (Kontext)~\cite{spotedit2026} & 50 & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R \\
+        SpotEdit (FLUX.2 Klein 4B)~\cite{spotedit2026} & 4 & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R \\
+        Sparse-LaViDa~\cite{sparselavida2026} & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R \\
+        SwiftEdit~\cite{swiftedit2025} & $1^{\dagger}$ & 0.48/0.48 & 23.71 & 20.51 & 0.0112 & 25.36 & 0.0622 & 0.0043 & 0.8327 & 0.3228 & 0.9339 & 0.9682 & 4.06 \\
+        ChordEdit~\cite{chordedit2026} & $1^{\dagger}$ & 0.28/0.32 & 26.05 & 22.72 & 0.0310 & 22.24 & 0.1256 & 0.0086 & 0.7625 & 0.5142 & 0.9062 & 0.9162 & 3.96 \\
+        TurboEdit~\cite{turboedit2024} & 4 & 0.49/0.49 & 26.51 & 23.08 & 0.0290 & 22.59 & 0.1008 & 0.0092 & 0.8029 & 0.4043 & 0.9196 & 0.9315 & 4.88 \\
+        DreamLite-mobile~\cite{dreamlite2026} & 4 & 0.45/0.43 & 26.54 & 23.10 & 0.0604 & 23.90 & 0.1167 & 0.0199 & 0.8240 & 0.3759 & 0.9581 & 0.9601 & 4.66 \\
+        FLUX.2 klein 4B~\cite{flux2klein2026} & 4 & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R \\
+        \midrule
+        Ours & 18 & 1.4/1.3 & 25 & 22 & 0.068 & 28 & 0.046 & 0.0023 & 0.88 & 0.23 & 0.96 & 0.97 & 4.6 \\
+        Ours & 1 & 0.49/0.48 & 26 & 22 & 0.064 & 24 & 0.064 & 0.0082 & 0.86 & 0.25 & 0.95 & 0.97 & 6.4 \\
+        \bottomrule
+    \end{tabular*}
+\end{table*}

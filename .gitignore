@@ -3,7 +3,8 @@ checkpoint
 outputs
 runs
 wandb
-third_party
+third_party/*
+!third_party/table_completion/
 .venv/
 .venv.backup-*
 .tools/
