@@ -1,0 +1,1 @@
+Transform the frame's texture to polished wood with a smooth wooden finish.

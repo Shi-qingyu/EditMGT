@@ -1,0 +1,154 @@
+{
+  "source_validation_dir": "runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/validation",
+  "source_step_dir": "runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/validation/step_011000",
+  "case": {
+    "test_index": 70,
+    "sample_id": 70,
+    "instruction": "Transform the frame's texture to polished wood with a smooth wooden finish.",
+    "edit_type": "Texture",
+    "language": "English",
+    "language_filter": "en",
+    "resolution": 1024,
+    "edit_area_ratio": 0.6194553375244141,
+    "source_original_size": [
+      1200,
+      1600
+    ],
+    "target_original_size": [
+      896,
+      1184
+    ],
+    "mask_original_size": [
+      500,
+      666
+    ],
+    "input_dir": "inputs/sample_00070",
+    "seed": 112,
+    "generated_path": "sample_00070/generated.png",
+    "reference_kv_cache": {
+      "enabled": true,
+      "inference_shift": 1.0,
+      "trained_prefix_mask": true,
+      "phase_threshold": 0.3,
+      "threshold": 0.3,
+      "capture_step": 15,
+      "reuse_steps": [
+        16,
+        17
+      ],
+      "cached_branches": [
+        "text",
+        "reference"
+      ],
+      "disabled_for_live_text_queries": false,
+      "text_length": 256,
+      "reference_length": 1024,
+      "num_layers": 42
+    },
+    "condition_kv_cache": {
+      "enabled": true,
+      "inference_shift": 1.0,
+      "trained_prefix_mask": true,
+      "phase_threshold": 0.3,
+      "threshold": 0.3,
+      "capture_step": 15,
+      "reuse_steps": [
+        16,
+        17
+      ],
+      "cached_branches": [
+        "text",
+        "reference"
+      ],
+      "disabled_for_live_text_queries": false,
+      "text_length": 256,
+      "reference_length": 1024,
+      "num_layers": 42
+    },
+    "edit_region": {
+      "sparse_target_halo": 0,
+      "vq_grid_size": [
+        64,
+        64
+      ],
+      "original_token_mask_ratio": 0.62646484375,
+      "generation_token_mask_ratio": 0.62646484375,
+      "preserve_unmasked_pixels": false,
+      "output_compositing": "none"
+    },
+    "generation_mask_path": "sample_00070/generation_mask.png",
+    "generation_mask_overlay_path": "sample_00070/generation_mask_overlay.png"
+  },
+  "validation_settings": {
+    "step": 11000,
+    "split": "test",
+    "use_ema": false,
+    "seconds": 25.193069756031036,
+    "language_filter": "en",
+    "num_inference_steps": 18,
+    "guidance_scale": 6.0,
+    "reference_strength": 1.0,
+    "negative_prompt": "",
+    "edit_only_diffusion": true,
+    "sparse_target": true,
+    "sparse_target_halo": 0,
+    "supervise_target_halo": false,
+    "preserve_unmasked_pixels": false,
+    "output_compositing": "none",
+    "use_reference_kv_cache": true,
+    "reference_kv_cache_threshold": 0.3,
+    "use_condition_kv_cache": null,
+    "cache_conditioning": true,
+    "condition_cache_threshold": 0.3,
+    "time_conditioning": "mask_ratio",
+    "masking_schedule": "cosine",
+    "inference_shift": 1.0,
+    "inference_schedule": {
+      "inference_shift": 1.0,
+      "masking_schedule": "cosine",
+      "mask_ratios": [
+        1.0,
+        0.9961946980917455,
+        0.984807753012208,
+        0.9659258262890683,
+        0.9396926207859084,
+        0.9063077870366499,
+        0.8660254037844387,
+        0.8191520442889918,
+        0.766044443118978,
+        0.7071067811865476,
+        0.6427876096865394,
+        0.5735764363510462,
+        0.5000000000000001,
+        0.42261826174069944,
+        0.3420201433256688,
+        0.25881904510252074,
+        0.17364817766693041,
+        0.08715574274765836,
+        0.0
+      ],
+      "time_conditioning": "mask_ratio",
+      "legacy_conditioning_timesteps": null
+    }
+  },
+  "source_artifacts": {
+    "source.png": "runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/validation/inputs/sample_00070/source.png",
+    "mask.png": "runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/validation/inputs/sample_00070/mask.png",
+    "mask_overlay.png": "runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/validation/inputs/sample_00070/mask_overlay.png",
+    "edited_tokens.png": "runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/validation/step_011000/sample_00070/generation_mask_overlay.png",
+    "edited_token_mask.png": "runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/validation/step_011000/sample_00070/generation_mask.png",
+    "edited.png": "runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/validation/step_011000/sample_00070/generated.png",
+    "target.png": "runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/validation/inputs/sample_00070/target.png",
+    "comparison.png": "runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/validation/step_011000/sample_00070/comparison.png"
+  },
+  "artifact_descriptions": {
+    "source.png": "Validation source image, 1024x1024.",
+    "mask.png": "Original annotation mask at validation resolution.",
+    "mask_overlay.png": "Original annotation mask over the source, shown in red.",
+    "edited_tokens.png": "Actual generation-token region over the source, shown in orange.",
+    "edited_token_mask.png": "Binary generation-token region, enlarged with nearest-neighbor sampling.",
+    "edited.png": "Existing model output from step 11000, 18 inference steps.",
+    "target.png": "Ground-truth target at validation resolution.",
+    "comparison.png": "Existing validation comparison panel."
+  }
+}

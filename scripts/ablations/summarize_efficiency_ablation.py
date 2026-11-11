@@ -269,6 +269,22 @@ def main(argv=None):
                 'Every speedup uses the same matched keys in its corresponding area bin.', '',
                 'Missing metric means are shown as —. Infinity and undefined counts are preserved in JSON/CSV. '
                 'All exclusions and per-stage coverage are reported below; no samples are selected by quality.', '']
+    subset_path = root / 'subset_manifest.json'
+    if subset_path.is_file():
+        subset = read_json(subset_path)
+        report['subset_selection'] = subset
+        markdown.extend(['## Sample selection', '',
+                         'This run deliberately selects small-mask examples for a speed stress test. '
+                         'Its overall speedups describe this selected subset, not the full benchmark distribution. '
+                         'Samples were chosen by original annotation mask area before measuring these runs; '
+                         'the exact IDs and mask fractions are in [subset_manifest.json](subset_manifest.json).', ''])
+        for benchmark in args.benchmarks:
+            rows = subset['samples'][benchmark]
+            fractions = [row['fraction'] for row in rows]
+            markdown.append(f'- {benchmark}: {len(rows)} selected; original mask area '
+                            f'{100 * min(fractions):.2f}%–{100 * max(fractions):.2f}%.')
+        markdown.extend(['', 'Inter-Edit candidates came from successful records in the earlier '
+                         'dense evaluation; PIE-Bench candidates came from its official mask annotations.', ''])
     for benchmark in args.benchmarks:
         data, keys, names, protocols, coverage = load_benchmark(root, benchmark)
         overall = [aggregate(benchmark, stage, keys, data, protocols[stage], names) for stage in STAGES]

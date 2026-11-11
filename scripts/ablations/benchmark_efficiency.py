@@ -4,6 +4,8 @@ Only command-local runner/config factories are replaced. Official benchmark
 sample selection, quality metrics, GPU sharding and resumable files are reused.
 The dense control uses the SAME sparse-trained SFT weights, ROI conditioning,
 generation region and source hard lock, but computes all target tokens.
+The sparse+cache stage captures text/reference KV on the first forward and
+keeps that cache frozen for every remaining forward.
 """
 import argparse
 from contextlib import contextmanager
@@ -162,7 +164,9 @@ class MatchedRunner:
                     preserve_unmasked_pixels=False, lora_part_enable=True,
                     use_reference_kv_cache=self.variant == 'sparse_cache',
                     use_condition_kv_cache=self.variant == 'sparse_cache',
-                    reference_kv_cache_threshold=args.reference_kv_cache_threshold).images[0].convert('RGB')
+                    reference_kv_cache_threshold=args.reference_kv_cache_threshold,
+                    condition_kv_cache_reuse_steps=args.num_inference_steps - 1 if args.cache_first_step else None,
+                    allow_early_condition_cache=args.cache_first_step).images[0].convert('RGB')
 
     def distill_forward(self, source, instruction, seed):
         from PIL import Image
@@ -309,14 +313,16 @@ def parse_args(argv=None):
     args.dimo_backend, args.dimo_r_init = own.distill_role, 1.0
     if args.vanilla or args.checkpoint is None or args.mask_mode != 'provided' or args.preserve_unmasked_pixels:
         parser.error('All variants require an explicit checkpoint, the same provided mask and direct VQ decode')
-    if args.reference_strength != 1 or args.negative_prompt != '' or args.cache_first_step:
-        parser.error('Use reference strength=1, empty negative prompt and trained-phase caching, without --cache-first-step')
+    if args.reference_strength != 1 or args.negative_prompt != '':
+        parser.error('Use reference strength=1 and empty negative prompt')
     if own.variant == 'distill' and (args.num_inference_steps != 1 or args.guidance_scale != 1):
         parser.error('The distilled endpoint requires one step and CFG=1')
     if own.variant == 'sparse_cache':
         if args.num_inference_steps < 2 or args.disable_reference_kv_cache or args.disable_condition_kv_cache:
             parser.error('sparse_cache requires >=2 forwards with condition/reference caching enabled')
-    elif not args.disable_reference_kv_cache or not args.disable_condition_kv_cache:
+        # Capture once at step 0, then reuse without refreshing at phase changes.
+        args.cache_first_step = True
+    elif args.cache_first_step or not args.disable_reference_kv_cache or not args.disable_condition_kv_cache:
         parser.error('Disable both runtime caches for dense, sparse and one-step distill')
     return args, entry
 

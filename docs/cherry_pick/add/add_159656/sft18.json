@@ -1,0 +1,134 @@
+{
+  "seed": 7860285743354548168,
+  "inference_seconds": 1.879024088382721,
+  "execution": {
+    "torch_version": "2.11.0+cu130",
+    "cuda_version": "13.0",
+    "device": "cuda:0",
+    "device_name": "NVIDIA H20",
+    "dtype": "bfloat16",
+    "time_conditioning": "mask_ratio",
+    "cache_conditioning": true,
+    "condition_cache_threshold": 0.3,
+    "checkpoint_condition_cache_threshold": 0.3,
+    "supervise_target_halo": false,
+    "warmup_generations_per_process": 1
+  },
+  "peak_allocated_bytes": 10941251584,
+  "peak_reserved_bytes": 12589203456,
+  "reference_cache": {
+    "enabled": true,
+    "inference_shift": 1.0,
+    "trained_prefix_mask": true,
+    "phase_threshold": 0.3,
+    "threshold": 0.3,
+    "capture_step": 15,
+    "reuse_steps": [
+      16,
+      17
+    ],
+    "cached_branches": [
+      "text",
+      "reference"
+    ],
+    "disabled_for_live_text_queries": false,
+    "requested_reuse_steps": null,
+    "approximate_early_snapshot": false,
+    "allow_early_capture": false,
+    "cache_mode": "trained_low_noise",
+    "text_length": 256,
+    "reference_length": 1024,
+    "num_layers": 42
+  },
+  "condition_cache": {
+    "enabled": true,
+    "inference_shift": 1.0,
+    "trained_prefix_mask": true,
+    "phase_threshold": 0.3,
+    "threshold": 0.3,
+    "capture_step": 15,
+    "reuse_steps": [
+      16,
+      17
+    ],
+    "cached_branches": [
+      "text",
+      "reference"
+    ],
+    "disabled_for_live_text_queries": false,
+    "requested_reuse_steps": null,
+    "approximate_early_snapshot": false,
+    "allow_early_capture": false,
+    "cache_mode": "trained_low_noise",
+    "text_length": 256,
+    "reference_length": 1024,
+    "num_layers": 42
+  },
+  "inference_schedule": {
+    "inference_shift": 1.0,
+    "masking_schedule": "cosine",
+    "mask_ratios": [
+      1.0,
+      0.9961946980917455,
+      0.984807753012208,
+      0.9659258262890683,
+      0.9396926207859084,
+      0.9063077870366499,
+      0.8660254037844387,
+      0.8191520442889918,
+      0.766044443118978,
+      0.7071067811865476,
+      0.6427876096865394,
+      0.5735764363510462,
+      0.5000000000000001,
+      0.42261826174069944,
+      0.3420201433256688,
+      0.25881904510252074,
+      0.17364817766693041,
+      0.08715574274765836,
+      0.0
+    ],
+    "time_conditioning": "mask_ratio",
+    "legacy_conditioning_timesteps": null
+  },
+  "sparse_target": true,
+  "supervise_target_halo": false,
+  "sparse_target_halo": 0,
+  "edit_region": {
+    "sparse_target_halo": 0,
+    "vq_grid_size": [
+      64,
+      64
+    ],
+    "original_token_mask_ratio": 0.05712890625,
+    "generation_token_mask_ratio": 0.05712890625,
+    "preserve_unmasked_pixels": false,
+    "output_compositing": "none"
+  },
+  "preserve_unmasked_pixels": false,
+  "output_compositing": "none",
+  "input_mask": {
+    "size": [
+      1024,
+      1024
+    ],
+    "edit_pixels": 59631,
+    "edit_fraction": 0.056868553161621094,
+    "edit_bbox": [
+      590,
+      351,
+      782,
+      723
+    ],
+    "native_size": [
+      1472,
+      1104
+    ],
+    "native_edit_bbox": [
+      849,
+      378,
+      1124,
+      780
+    ]
+  }
+}

@@ -12,6 +12,8 @@ set -euo pipefail
 # Defaults: first three rows share SFT weights, 18 steps and CFG=1. Distill uses
 # one step, CFG=1. Set TEACHER_CFG=6 for the operational teacher protocol; actual
 # steps/CFG are always reported. HALO=1 and its supervision are shared by all.
+# Sparse+cache captures text/reference KV on the first forward and freezes it
+# for all remaining forwards (17 reuses with the default 18 steps).
 # Dense means full target computation with the SAME mask/source hard lock and
 # ROI conditioning, not the released mask-free vanilla model.
 # MASK_AREA_BINS partition existing annotations; annotations/GT are not mutated.
@@ -25,7 +27,7 @@ ABLATION_PYTHON="${ABLATION_PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
 BASE_MODEL_DIR="${BASE_MODEL_DIR:-$PROJECT_ROOT/checkpoint/EditMGT}"
 SFT_CHECKPOINT="${SFT_CHECKPOINT:-$PROJECT_ROOT/runs/editmgt_sparse_inter_edit_en_cache_magicbrush_no_dilation_maskfix/checkpoint-8000}"
 DISTILL_CHECKPOINT="${DISTILL_CHECKPOINT:-$PROJECT_ROOT/runs/region_dimo_cbc_inter_brush_maskedit/checkpoint-4000}"
-ABLATION_OUTPUT_DIR="${ABLATION_OUTPUT_DIR:-$PROJECT_ROOT/outputs/efficiency_ablation_cbc}"
+ABLATION_OUTPUT_DIR="${ABLATION_OUTPUT_DIR:-$PROJECT_ROOT/outputs/efficiency_ablation_cbc_first_step_cache}"
 INTER_EDIT_ROOT="${INTER_EDIT_ROOT:-/mnt/geminihzceph/public/data/Inter-Edit}"
 PIE_BENCH_ROOT="${PIE_BENCH_ROOT:-$PROJECT_ROOT/data/PIE-Bench}"
 ALPHA_CLIP_CKPT="${ALPHA_CLIP_CKPT:-$PROJECT_ROOT/checkpoint/AlphaCLIP/clip_l14_grit1m_fultune_8xe.pth}"
@@ -70,11 +72,23 @@ for benchmark in "${benchmarks[@]}"; do
             --mask-mode provided --sparse-target-halo "$HALO" --no-preserve-unmasked-pixels
             --condition-cache-threshold "$CACHE_THRESHOLD" --reference-kv-cache-threshold "$CACHE_THRESHOLD"
             --resume)
-        if [[ "$variant" != sparse_cache ]]; then
+        if [[ "$variant" == sparse_cache ]]; then
+            common+=(--cache-first-step)
+        else
             common+=(--disable-reference-kv-cache --disable-condition-kv-cache)
         fi
         if [[ -n "${LIMIT:-}" ]]; then
             common+=(--limit "$LIMIT")
+        fi
+        if [[ "$benchmark" == inter_edit && -n "${INTER_EDIT_INDICES_FILE:-}" ]]; then
+            mapfile -t subset_indices < "$INTER_EDIT_INDICES_FILE"
+            if (( ${#subset_indices[@]} == 0 )); then echo "Empty Inter-Edit subset" >&2; exit 2; fi
+            common+=(--sample-indices "${subset_indices[@]}")
+        fi
+        if [[ "$benchmark" == pie_bench && -n "${PIE_SAMPLE_IDS_FILE:-}" ]]; then
+            mapfile -t subset_ids < "$PIE_SAMPLE_IDS_FILE"
+            if (( ${#subset_ids[@]} == 0 )); then echo "Empty PIE-Bench subset" >&2; exit 2; fi
+            common+=(--sample-ids "${subset_ids[@]}")
         fi
         if [[ -n "${MODEL_CACHE_DIR:-}" ]]; then
             common+=(--model-cache-dir "$MODEL_CACHE_DIR")

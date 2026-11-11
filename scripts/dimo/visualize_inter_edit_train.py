@@ -89,20 +89,27 @@ def prepare(args):
 
 
 def run_sft(args):
+    extra=[]
+    if args.condition_cache_threshold is not None:
+        extra.extend(['--condition-cache-threshold',str(args.condition_cache_threshold)])
+    if args.reference_kv_cache_threshold is not None:
+        extra.extend(['--reference-kv-cache-threshold',str(args.reference_kv_cache_threshold)])
     benchmark,_=benchmark_args(['--benchmark','inter_edit','--backend','teacher',
         '--checkpoint',str(args.sft_checkpoint),'--model-path',str(args.base_model),
         '--guidance-scale','6','--num-inference-steps','18','--bf16',
-        '--output-dir',str(args.output_dir/'_benchmark_unused'),'--stage','generate'])
+        '--output-dir',str(args.output_dir/'_benchmark_unused'),'--stage','generate',*extra])
     runner=InferenceRunner(benchmark)
     try:
-        for index,row in enumerate(rows_from_manifest(args.output_dir),1):
+        for index,row in enumerate(rows_from_manifest(args.output_dir)):
+            if index % args.num_shards != args.shard_index:
+                continue
             output=args.output_dir/row['name']/'sft18.png'
             if output.is_file():continue
             with Image.open(args.output_dir/row['source']) as source, Image.open(args.output_dir/row['mask']) as mask:
                 image,info=runner.generate(source,mask,row['instruction'],row['seed'])
             image.save(output)
             output.with_suffix('.json').write_text(json.dumps(info,ensure_ascii=False,indent=2)+'\n')
-            print(f'SFT {index}: {row["name"]}',flush=True)
+            print(f'SFT {index + 1}: {row["name"]}',flush=True)
     finally:
         runner.close()
 
@@ -143,8 +150,14 @@ def main():
     parser.add_argument('--per-type',type=int,default=20)
     parser.add_argument('--seed',type=int,default=42)
     parser.add_argument('--device',default='cuda:0')
+    parser.add_argument('--condition-cache-threshold',type=float,default=None)
+    parser.add_argument('--reference-kv-cache-threshold',type=float,default=None)
+    parser.add_argument('--num-shards',type=int,default=1)
+    parser.add_argument('--shard-index',type=int,default=0)
     args=parser.parse_args()
     if args.per_type<1:parser.error('--per-type must be positive')
+    if args.num_shards<1 or not 0<=args.shard_index<args.num_shards:
+        parser.error('--shard-index must be in [0, --num-shards)')
     {'prepare':prepare,'sft':run_sft,'dimo':run_dimo}[args.stage](args)
 
 
