@@ -4,16 +4,16 @@
 % Sampling configurations follow their cited releases; N/R marks scores not
 % reported or measured under the stated PIE-Bench and Inter-Edit protocols.
 % Latencies: matched-key PIE-Bench/Inter-Edit timing in the Ours source above.
-% DICE/GIDE: user-provided Table 1, PIE-Bench quality metrics; timings await remeasurement.
+% GIDE: user-provided Table 1 PIE-Bench metrics; DICE: local full PIE-Bench evaluation.
 % Undo source scaling: Dist./LPIPS/SSIM divided by 100; MSE divided by 1000.
 \begin{table*}[!t]
     \centering
     \caption{\textbf{Quantitative comparison on PIE-Bench and Inter-Edit.}
-    Latency lists inference time in PIE-Bench/Inter-Edit order
+    Latency lists inference time
     (Sec.~\ref{sec:efficiency}). Published Inter-Edit scores use the full test set;
     locally evaluated EditMGT and Ours use the English subset.
     Real-time rows with numeric scores use local full-split evaluation.
-    DICE and GIDE use source-reported PIE-Bench quality results.
+    DICE (Paella) uses local full-split results with source and target captions; GIDE uses source-reported quality results.
     SpotEdit uses a four-step FLUX.2 Klein 4B adaptation.
     $\dagger$: steps exclude SwiftEdit inversion and ChordEdit proximal refinement.
     N/R indicates unavailable results.}
@@ -33,30 +33,30 @@
         & LPIPS$\downarrow$ & $S_{\mathrm{in}}\uparrow$ & $S_{\mathrm{out}}\uparrow$ & BSS$\downarrow$ \\
         \midrule
         \multicolumn{14}{@{}l}{\textit{End-to-end image editing models}} \\
-        MMaDA-Parallel~\cite{mmadaparallel2025} & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R \\
-        Lumina-DiMOO~\cite{luminadimoo2025} & 64 & 185.40/185.40 & 24.52 & 21.36 & 0.0272 & 25.99 & 0.0611 & 0.0049 & 0.8038 & 0.3131 & 0.9483 & 0.9661 & 4.02 \\
-        EditMGT~\cite{editmgt2026} & 36 & 4.6/4.5 & 25.49 & 22.10 & 0.0654 & 21.73 & 0.1206 & 0.0177 & 0.7925 & 0.3268 & 0.9438 & 0.9546 & 4.75 \\
-        NEP~\cite{nep2025} & AR & 60.00/18.00 & 25.52 & 22.24 & 0.0165 & 28.48 & 0.0314 & 0.0022 & 0.9046 & 0.2616 & 0.9547 & 0.9890 & 3.91 \\
+        MMaDA-Parallel~\cite{mmadaparallel2025} & 64 & 347.60 & 25.67 & 22.86 & 0.1232 & 13.72 & 0.3005 & 0.0559 & 0.6162 & 0.5923 & 0.9219 & 0.9129 & 3.24 \\
+        Lumina-DiMOO~\cite{luminadimoo2025} & 64 & 185.40 & 24.52 & 21.36 & 0.0272 & 25.99 & 0.0611 & 0.0049 & 0.8038 & 0.3131 & 0.9483 & 0.9661 & 4.02 \\
+        EditMGT~\cite{editmgt2026} & 36 & 4.6 & 25.49 & 22.10 & 0.0654 & 21.73 & 0.1206 & 0.0177 & 0.7925 & 0.3268 & 0.9438 & 0.9546 & 4.75 \\
+        NEP~\cite{nep2025} & AR & 60.00 & 25.52 & 22.24 & 0.0165 & 28.48 & 0.0314 & 0.0022 & 0.9046 & 0.2616 & 0.9547 & 0.9890 & 3.91 \\
         \midrule
         \multicolumn{14}{@{}l}{\textit{Instruction-based image editing models}} \\
         InstructPix2Pix~\cite{instructpix2pix2023} & N/R & N/R & 23.61 & 21.64 & 0.0579 & 20.82 & 0.1586 & 0.0228 & 0.7626 & 0.37 & 0.91 & 0.94 & 11 \\
-        UltraEdit~\cite{ultraedit2024} & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R \\
-        DICE~\cite{dice2024} & N/R & N/R & 24.70 & 21.76 & 0.1784 & 9.01 & 0.4889 & 0.16070 & 0.4700 & N/R & N/R & N/R & N/R \\
+        UltraEdit~\cite{ultraedit2024} & 50 & 12.20 & 25.70 & 22.42 & 0.0111 & 33.97 & 0.0151 & 0.0008 & 0.9406 & 0.2658 & 0.9579 & 0.9873 & 4.15 \\
+        DICE~\cite{dice2024} & 32+32 & 32.40 & 24.84 & 21.72 & 0.0111 & 27.45 & 0.0444 & 0.0042 & 0.9073 & N/R & N/R & N/R & N/R \\
         GIDE~\cite{gide2026} & N/R & N/R & 24.70 & 22.17 & 0.0384 & 24.37 & 0.0786 & 0.00836 & 0.7924 & N/R & N/R & N/R & N/R \\
         Inter-Edit--RNI~\cite{interedit2026} & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & 0.19 & 0.98 & 0.97 & 10 \\
         Inter-Edit--CJT~\cite{interedit2026} & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & 0.24 & 0.98 & 0.96 & 5.4 \\
         \midrule
         \multicolumn{14}{@{}l}{\textit{Real-time image editing models}} \\
-        SpotEdit (FLUX.2 Klein 4B)~\cite{spotedit2026} & 4 & 1.94/1.66 & 26.51 & 23.03 & 0.0422 & 28.87 & 0.0490 & 0.0047 & 0.9458 & 0.2196 & 0.9665 & 0.9788 & 3.82 \\
-        Sparse-LaViDa~\cite{sparselavida2026} & 64 & 22.47/22.51 & 26.32 & 23.39 & 0.1301 & 14.16 & 0.2928 & 0.0505 & 0.6033 & 0.5915 & 0.9248 & 0.9233 & 5.00 \\
-        SwiftEdit~\cite{swiftedit2025} & $1^{\dagger}$ & 1.92/1.92 & 23.71 & 20.51 & 0.0112 & 25.36 & 0.0622 & 0.0043 & 0.8327 & 0.3228 & 0.9339 & 0.9682 & 4.06 \\
-        ChordEdit~\cite{chordedit2026} & $1^{\dagger}$ & 1.12/1.28 & 26.05 & 22.72 & 0.0310 & 22.24 & 0.1256 & 0.0086 & 0.7625 & 0.5142 & 0.9062 & 0.9162 & 3.96 \\
-        TurboEdit~\cite{turboedit2024} & 4 & 1.96/1.96 & 26.51 & 23.08 & 0.0290 & 22.59 & 0.1008 & 0.0092 & 0.8029 & 0.4043 & 0.9196 & 0.9315 & 4.88 \\
-        DreamLite-mobile~\cite{dreamlite2026} & 4 & 0.45/0.43 & 26.54 & 23.10 & 0.0604 & 23.90 & 0.1167 & 0.0199 & 0.8240 & 0.3759 & 0.9581 & 0.9601 & 4.66 \\
-        FLUX.2 klein 4B~\cite{flux2klein2026} & 4 & 2.92/2.91 & 26.70 & 23.56 & 0.0431 & 27.48 & 0.0554 & 0.0055 & 0.9421 & 0.2195 & 0.9750 & 0.9751 & 4.92 \\
+        SpotEdit (FLUX.2 Klein 4B)~\cite{spotedit2026} & 4 & 1.94 & 26.51 & 23.03 & 0.0422 & 28.87 & 0.0490 & 0.0047 & 0.9458 & 0.2196 & 0.9665 & 0.9788 & 3.82 \\
+        Sparse-LaViDa~\cite{sparselavida2026} & 64 & 22.51 & 26.32 & 23.39 & 0.1301 & 14.16 & 0.2928 & 0.0505 & 0.6033 & 0.5915 & 0.9248 & 0.9233 & 5.00 \\
+        SwiftEdit~\cite{swiftedit2025} & $1^{\dagger}$ & 1.92 & 23.71 & 20.51 & 0.0112 & 25.36 & 0.0622 & 0.0043 & 0.8327 & 0.3228 & 0.9339 & 0.9682 & 4.06 \\
+        ChordEdit~\cite{chordedit2026} & $1^{\dagger}$ & 1.28 & 26.05 & 22.72 & 0.0310 & 22.24 & 0.1256 & 0.0086 & 0.7625 & 0.5142 & 0.9062 & 0.9162 & 3.96 \\
+        TurboEdit~\cite{turboedit2024} & 4 & 1.96 & 26.51 & 23.08 & 0.0290 & 22.59 & 0.1008 & 0.0092 & 0.8029 & 0.4043 & 0.9196 & 0.9315 & 4.88 \\
+        DreamLite-mobile~\cite{dreamlite2026} & 4 & 0.45 & 26.54 & 23.10 & 0.0604 & 23.90 & 0.1167 & 0.0199 & 0.8240 & 0.3759 & 0.9581 & 0.9601 & 4.66 \\
+        FLUX.2 klein 4B~\cite{flux2klein2026} & 4 & 2.92 & 26.70 & 23.56 & 0.0431 & 27.48 & 0.0554 & 0.0055 & 0.9421 & 0.2195 & 0.9750 & 0.9751 & 4.92 \\
         \midrule
-        Ours & 18 & 1.4/1.3 & 25 & 22 & 0.068 & 28 & 0.046 & 0.0023 & 0.88 & 0.23 & 0.96 & 0.97 & 4.6 \\
-        Ours & 1 & 0.49/0.48 & 26 & 22 & 0.064 & 24 & 0.064 & 0.0082 & 0.86 & 0.25 & 0.95 & 0.97 & 6.4 \\
+        Ours & 18 & 1.31 & 26.82 & 23.52 & 0.068 & 28.27 & 0.046 & 0.0023 & 0.8857 & 0.2012 & 0.9673 & 0.9773 & 4.65 \\
+        Ours & 1 & 0.48 & 26.15 & 22.46 & 0.064 & 24.97 & 0.064 & 0.0082 & 0.8692 & 0.2359 & 0.9602 & 0.9745 & 6.41 \\
         \bottomrule
     \end{tabular*}
 \end{table*}
