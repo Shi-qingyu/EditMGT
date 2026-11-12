@@ -1,0 +1,40 @@
+{
+  "run_id": "0f0df9b3b223a55286c66b3a7188a18e0021db92c7c8e457f683020a6ee65244",
+  "case": "local/sample_00029",
+  "model": "swiftedit",
+  "seed": 42,
+  "instruction": "Replace the plain luggage tag with a colorful patterned luggage tag.",
+  "protocol": {
+    "backend": "swiftedit",
+    "label": "SwiftEdit v1.0",
+    "steps": "1 inversion + 1 editing",
+    "resolution": 512,
+    "prompt_protocol": "authored source and target captions",
+    "weights": [
+      "third_party/SwiftEdit/swiftedit_weights",
+      "third_party/ChordEdit/models/sd-turbo",
+      "third_party/SwiftEdit/models/sd21base",
+      "third_party/SwiftEdit/models/ip_adapter"
+    ]
+  },
+  "source_caption": "A plain beige luggage tag hangs from the handle of a silver suitcase in an airport.",
+  "target_caption": "A colorful patterned luggage tag hangs from the handle of a silver suitcase in an airport.",
+  "gide": null,
+  "created_at": "2026-11-12T11:59:59.479404+00:00",
+  "status": "ok",
+  "seconds": 0.48300090059638023,
+  "source_size": [
+    512,
+    512
+  ],
+  "model_input_size": [
+    512,
+    512
+  ],
+  "output_size": [
+    512,
+    512
+  ],
+  "image": "cases/local/sample_00029/swiftedit/seed_0000000042.png",
+  "fallback_reason": null
+}

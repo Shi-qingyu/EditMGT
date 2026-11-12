@@ -1,0 +1,40 @@
+{
+  "run_id": "0f0df9b3b223a55286c66b3a7188a18e0021db92c7c8e457f683020a6ee65244",
+  "case": "local/sample_00029",
+  "model": "lumina_dimoo",
+  "seed": 42,
+  "instruction": "Replace the plain luggage tag with a colorful patterned luggage tag.",
+  "protocol": {
+    "backend": "lumina_dimoo",
+    "label": "Lumina-DiMOO",
+    "steps": 64,
+    "resolution": 512,
+    "prompt_protocol": "instruction",
+    "weights": "third_party/Lumina-DiMOO/models/Lumina-DiMOO",
+    "settings": {
+      "cfg_scale": 2.5,
+      "cfg_img": 4.0,
+      "temperature": 1.0
+    }
+  },
+  "source_caption": "A plain beige luggage tag hangs from the handle of a silver suitcase in an airport.",
+  "target_caption": "A colorful patterned luggage tag hangs from the handle of a silver suitcase in an airport.",
+  "gide": null,
+  "created_at": "2026-11-12T11:36:59.166597+00:00",
+  "status": "ok",
+  "seconds": 46.27145341783762,
+  "source_size": [
+    512,
+    512
+  ],
+  "model_input_size": [
+    512,
+    512
+  ],
+  "output_size": [
+    512,
+    512
+  ],
+  "image": "cases/local/sample_00029/lumina_dimoo/seed_0000000042.png",
+  "fallback_reason": null
+}

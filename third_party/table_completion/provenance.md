@@ -177,6 +177,12 @@ checkpoints; their conditioning and image resolution vary by model.
   removal, background, and style. Its output and status JSON are under
   [`pie_bench_smoke_types`](../../outputs/real_time_baselines/gide_pie/pie_bench_smoke_types);
   those concurrent smoke timings are excluded from the table.
+  When both SAM 3 and attention/SAM 2 grounding yield an empty region, the
+  local adapter retries inversion on the full source frame and records
+  `full_frame_after_empty_grounding` in that sample's JSON. This fallback
+  uses no target image or benchmark annotation mask.
+  The repository file `evaluation/evaluate_magicbrush.py` instantiates
+  InstructPix2Pix, so it does not provide GIDE MagicBrush scores.
 
 ## User-provided DICE/GIDE PIE-Bench results
 

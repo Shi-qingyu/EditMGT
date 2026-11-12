@@ -1,0 +1,35 @@
+{
+  "run_id": "0f0df9b3b223a55286c66b3a7188a18e0021db92c7c8e457f683020a6ee65244",
+  "case": "add/sample_00118",
+  "model": "dreamlite",
+  "seed": 47,
+  "instruction": "Add an umbrella next to the open book.",
+  "protocol": {
+    "backend": "dreamlite_mobile",
+    "label": "DreamLite-mobile",
+    "steps": 4,
+    "resolution": 1024,
+    "prompt_protocol": "instruction",
+    "weights": "third_party/DreamLite/models/DreamLite-mobile"
+  },
+  "source_caption": "An open book lies on a wet stone bench beside outdoor bookshelves on a rainy autumn day.",
+  "target_caption": "An open umbrella rests next to an open book on a wet stone bench beside outdoor bookshelves on a rainy autumn day.",
+  "gide": null,
+  "created_at": "2026-11-12T11:57:38.495195+00:00",
+  "status": "ok",
+  "seconds": 0.42186789587140083,
+  "source_size": [
+    512,
+    512
+  ],
+  "model_input_size": [
+    1024,
+    1024
+  ],
+  "output_size": [
+    1024,
+    1024
+  ],
+  "image": "cases/add/sample_00118/dreamlite/seed_0000000047.png",
+  "fallback_reason": null
+}

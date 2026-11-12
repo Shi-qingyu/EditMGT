@@ -1,0 +1,39 @@
+{
+  "key": "remove/sample_00016",
+  "edit_type": "remove",
+  "output_dir": "cases/remove/sample_00016",
+  "original_instruction": null,
+  "instruction": "Remove the wooden handles from the rolling pin.",
+  "instruction_origin": "Reconstructed from the original edit-mask region and generated result in the legacy comparison panel; original instruction is unavailable.",
+  "instruction_note": "",
+  "source_input": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/cherry_pick/remove/sample_00016/comparison.png",
+  "source_crop": [
+    0,
+    52,
+    512,
+    564
+  ],
+  "source_sha256": "87e83c1f0b57c2c4e96c36d9dfd2ce875fdea76b812dfbf6b42db09555749339",
+  "source_note": "First source tile from legacy comparison, 512px preview.",
+  "source_caption": "A colorful marble rolling pin with wooden handles rests on a flour-dusted cloth on a kitchen counter.",
+  "caption": "A colorful marble rolling pin without handles rests on a flour-dusted cloth on a kitchen counter.",
+  "caption_origin": "Authored supplemental captions in cherry_pick_cases.json",
+  "gide": {
+    "original_prompt": "A colorful marble rolling pin with wooden handles rests on a flour-dusted cloth on a kitchen counter.",
+    "editing_prompt": "A colorful marble rolling pin without handles rests on a flour-dusted cloth on a kitchen counter.",
+    "source_subject": "wooden handles",
+    "target_subject": "rolling pin",
+    "editing_type_id": "3",
+    "editing_instruction": "Remove the wooden handles from the rolling pin."
+  },
+  "references": {
+    "comparison.png": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/cherry_pick/remove/sample_00016/comparison.png",
+    "generation_mask.png": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/cherry_pick/remove/sample_00016/generation_mask.png",
+    "ours.png": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/cherry_pick/remove/sample_00016/generated.png"
+  },
+  "reference_sha256": {
+    "comparison.png": "87e83c1f0b57c2c4e96c36d9dfd2ce875fdea76b812dfbf6b42db09555749339",
+    "generation_mask.png": "aa3f541f0585e6165facea9d0b2328635d616e9c26e69166139919d18154387c",
+    "ours.png": "7df7bb628a1b03edd795ef070ff7d64feb5924817025fe1ceff832e5b3ed83ad"
+  }
+}

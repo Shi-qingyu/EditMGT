@@ -1,0 +1,39 @@
+{
+  "key": "add/sample_00118",
+  "edit_type": "add",
+  "output_dir": "cases/add/sample_00118",
+  "original_instruction": null,
+  "instruction": "Add an umbrella next to the open book.",
+  "instruction_origin": "Reconstructed from the legacy comparison panel; original instruction is unavailable.",
+  "instruction_note": "",
+  "source_input": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/cherry_pick/add/sample_00118/comparison.png",
+  "source_crop": [
+    0,
+    52,
+    512,
+    564
+  ],
+  "source_sha256": "5a8a4e2e5d4a8a7d005551d9bfb653db5d96d0a99375444c1f91af0da71a9089",
+  "source_note": "First source tile from legacy comparison, 512px preview.",
+  "source_caption": "An open book lies on a wet stone bench beside outdoor bookshelves on a rainy autumn day.",
+  "caption": "An open umbrella rests next to an open book on a wet stone bench beside outdoor bookshelves on a rainy autumn day.",
+  "caption_origin": "Authored supplemental captions in cherry_pick_cases.json",
+  "gide": {
+    "original_prompt": "An open book lies on a wet stone bench beside outdoor bookshelves on a rainy autumn day.",
+    "editing_prompt": "An open umbrella rests next to an open book on a wet stone bench beside outdoor bookshelves on a rainy autumn day.",
+    "source_subject": "stone bench",
+    "target_subject": "umbrella",
+    "editing_type_id": "2",
+    "editing_instruction": "Add an umbrella next to the open book."
+  },
+  "references": {
+    "comparison.png": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/cherry_pick/add/sample_00118/comparison.png",
+    "generation_mask.png": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/cherry_pick/add/sample_00118/generation_mask.png",
+    "ours.png": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/cherry_pick/add/sample_00118/generated.png"
+  },
+  "reference_sha256": {
+    "comparison.png": "5a8a4e2e5d4a8a7d005551d9bfb653db5d96d0a99375444c1f91af0da71a9089",
+    "generation_mask.png": "966f6da52ff3e14ad1721f81eb8012fc65dc7ae898c78526bd5d28778420c2bf",
+    "ours.png": "a479e1519bb79d8bbd21ee7cf773a0a6bea1bb34704a3abf560d6310269726e5"
+  }
+}

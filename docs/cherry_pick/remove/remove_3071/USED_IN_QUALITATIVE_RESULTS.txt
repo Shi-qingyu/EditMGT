@@ -1,0 +1,7 @@
+已用于 qualitative results。
+核对依据：用户于 2026-11-12 提供的 6 列图片（Source + mask / Edited (18 steps)）。
+图中位置：从左到右第 3 列。
+Case：remove/remove_3071
+图中指令：Remove the cowbell.
+编辑结果：sft18.png
+标记范围仅限上述图片，与 docs/qualitative_results 中旧版 DiMO 案例清单独立。

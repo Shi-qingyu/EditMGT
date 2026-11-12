@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "notes": [
+    "Only cases without USED_IN_QUALITATIVE_RESULTS.txt are selected.",
+    "Supplemental captions and subjects are authored from the source scene and edit intent for GIDE and SwiftEdit; they are not official dataset captions.",
+    "Five legacy sample_* directories lack source.png and instruction.txt. Their source is the first tile of comparison.png; their instructions are explicitly reconstructed below.",
+    "Original instruction and any clarification are saved separately in the output manifest. Target images and existing EditMGT results are references only and are never model inputs."
+  ],
+  "cases": {
+    "add/add_159656": {
+      "source_caption": "A person stands in a pastel pink architectural alcove.",
+      "target_caption": "A person stands in a pastel pink architectural alcove with a potted plant next to the person.",
+      "source_subject": "person",
+      "target_subject": "potted plant"
+    },
+    "add/add_356307": {
+      "source_caption": "A blanket is draped over a rock in a golden meadow at sunset.",
+      "target_caption": "A bouquet of colorful flowers rests next to the blanket draped over a rock in a golden meadow at sunset.",
+      "source_subject": "blanket",
+      "target_subject": "bouquet of colorful flowers"
+    },
+    "add/add_964913": {
+      "source_caption": "A pair of sandals sits on a rock beside a river with grasses along the bank.",
+      "target_caption": "A pair of sandals sits on a rock beside a river, with a small boat floating on the river and grasses along the bank.",
+      "source_subject": "river",
+      "target_subject": "small boat"
+    },
+    "add/sample_00118": {
+      "instruction": "Add an umbrella next to the open book.",
+      "instruction_origin": "Reconstructed from the legacy comparison panel; original instruction is unavailable.",
+      "source_caption": "An open book lies on a wet stone bench beside outdoor bookshelves on a rainy autumn day.",
+      "target_caption": "An open umbrella rests next to an open book on a wet stone bench beside outdoor bookshelves on a rainy autumn day.",
+      "source_subject": "stone bench",
+      "target_subject": "umbrella"
+    },
+    "local/local_613221": {
+      "source_caption": "Ripped blue jeans with holes lie on snow among bare trees.",
+      "target_caption": "Blue jeans with intact denim and repaired holes lie on snow among bare trees.",
+      "source_subject": "jeans",
+      "target_subject": "jeans"
+    },
+    "local/local_852918": {
+      "instruction_override": "Replace the static on the television screen with an autumn landscape.",
+      "instruction_note": "Clarifies the referent of the original instruction, 'Replace it with an autumn landscape.', for models without an annotation mask.",
+      "source_caption": "A vintage television screen displays static in a sunlit living room next to a vase of flowers.",
+      "target_caption": "A vintage television screen displays an autumn landscape in a sunlit living room next to a vase of flowers.",
+      "source_subject": "television screen",
+      "target_subject": "television screen"
+    },
+    "local/sample_00029": {
+      "instruction": "Replace the plain luggage tag with a colorful patterned luggage tag.",
+      "instruction_origin": "Reconstructed from the legacy comparison panel; original instruction is unavailable.",
+      "source_caption": "A plain beige luggage tag hangs from the handle of a silver suitcase in an airport.",
+      "target_caption": "A colorful patterned luggage tag hangs from the handle of a silver suitcase in an airport.",
+      "source_subject": "luggage tag",
+      "target_subject": "luggage tag"
+    },
+    "local/sample_00031": {
+      "instruction": "Replace the metal watch strap with a brown leather strap.",
+      "instruction_origin": "Reconstructed from the legacy comparison panel; original instruction is unavailable.",
+      "source_caption": "A wristwatch with a white dial and a metal watch strap sits on a marble surface in a studio.",
+      "target_caption": "A wristwatch with a white dial and a brown leather watch strap sits on a marble surface in a studio.",
+      "source_subject": "watch strap",
+      "target_subject": "watch strap"
+    },
+    "remove/remove_166448": {
+      "instruction_override": "Remove the goat.",
+      "instruction_note": "The original instruction is only 'Remove'; the source image identifies the goat as the editing subject.",
+      "source_caption": "A goat stands on a misty grassy hillside with a winding path and conifer trees.",
+      "target_caption": "An empty misty grassy hillside with a winding path and conifer trees.",
+      "source_subject": "goat",
+      "target_subject": "hillside"
+    },
+    "remove/remove_499295": {
+      "source_caption": "Snow covers a windowsill beneath a frosted window beside a steaming mug and bookshelves.",
+      "target_caption": "A clean bare windowsill beneath a frosted window beside a steaming mug and bookshelves.",
+      "source_subject": "snow",
+      "target_subject": "windowsill"
+    },
+    "remove/sample_00016": {
+      "instruction": "Remove the wooden handles from the rolling pin.",
+      "instruction_origin": "Reconstructed from the original edit-mask region and generated result in the legacy comparison panel; original instruction is unavailable.",
+      "source_caption": "A colorful marble rolling pin with wooden handles rests on a flour-dusted cloth on a kitchen counter.",
+      "target_caption": "A colorful marble rolling pin without handles rests on a flour-dusted cloth on a kitchen counter.",
+      "source_subject": "wooden handles",
+      "target_subject": "rolling pin"
+    },
+    "remove/sample_00114": {
+      "instruction": "Remove the flying leaves and scattered rocks around the giraffe.",
+      "instruction_origin": "Reconstructed from the legacy comparison panel; original instruction is unavailable.",
+      "source_caption": "A giraffe runs across a savanna surrounded by flying leaves and scattered rocks, with distant hills under a pale sky.",
+      "target_caption": "A giraffe runs across a clear grassy savanna with distant hills under a pale sky.",
+      "source_subject": "flying leaves and scattered rocks",
+      "target_subject": "savanna"
+    },
+    "texture/sample_00070_step_011000": {
+      "source_caption": "A patterned cardboard frame surrounds a pale rose and green leaves on beige fabric.",
+      "target_caption": "A smooth polished wooden frame surrounds a pale rose and green leaves on beige fabric.",
+      "source_subject": "frame",
+      "target_subject": "frame"
+    },
+    "texture/texture_930239": {
+      "source_caption": "A white cotton T-shirt lies on grass in a misty illustrated forest.",
+      "target_caption": "A T-shirt made of fluffy white fur lies on grass in a misty illustrated forest.",
+      "source_subject": "T-shirt",
+      "target_subject": "T-shirt"
+    }
+  }
+}

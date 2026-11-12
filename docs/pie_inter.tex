@@ -4,7 +4,7 @@
 % Sampling configurations follow their cited releases; N/R marks scores not
 % reported or measured under the stated PIE-Bench and Inter-Edit protocols.
 % Latencies: matched-key PIE-Bench/Inter-Edit timing in the Ours source above.
-% GIDE: user-provided Table 1 PIE-Bench metrics; DICE: local full PIE-Bench evaluation.
+% DICE and GIDE PIE-Bench blocks: local full-split evaluations.
 % Undo source scaling: Dist./LPIPS/SSIM divided by 100; MSE divided by 1000.
 \begin{table*}[!t]
     \centering
@@ -13,7 +13,7 @@
     (Sec.~\ref{sec:efficiency}). Published Inter-Edit scores use the full test set;
     locally evaluated EditMGT and Ours use the English subset.
     Real-time rows with numeric scores use local full-split evaluation.
-    DICE (Paella) uses local full-split results with source and target captions; GIDE uses source-reported quality results.
+    DICE (Paella) and GIDE use local full-split results with source and target captions; GIDE also uses subject annotations.
     SpotEdit uses a four-step FLUX.2 Klein 4B adaptation.
     $\dagger$: steps exclude SwiftEdit inversion and ChordEdit proximal refinement.
     N/R indicates unavailable results.}
@@ -42,7 +42,7 @@
         InstructPix2Pix~\cite{instructpix2pix2023} & N/R & N/R & 23.61 & 21.64 & 0.0579 & 20.82 & 0.1586 & 0.0228 & 0.7626 & 0.37 & 0.91 & 0.94 & 11 \\
         UltraEdit~\cite{ultraedit2024} & 50 & 12.20 & 25.70 & 22.42 & 0.0111 & 33.97 & 0.0151 & 0.0008 & 0.9406 & 0.2658 & 0.9579 & 0.9873 & 4.15 \\
         DICE~\cite{dice2024} & 32+32 & 32.40 & 24.84 & 21.72 & 0.0111 & 27.45 & 0.0444 & 0.0042 & 0.9073 & N/R & N/R & N/R & N/R \\
-        GIDE~\cite{gide2026} & N/R & N/R & 24.70 & 22.17 & 0.0384 & 24.37 & 0.0786 & 0.00836 & 0.7924 & N/R & N/R & N/R & N/R \\
+        GIDE~\cite{gide2026} & 64--192 & 56.96/N/R & 26.04 & 22.94 & 0.0474 & 23.62 & 0.0908 & 0.0121 & 0.7777 & N/R & N/R & N/R & N/R \\
         Inter-Edit--RNI~\cite{interedit2026} & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & 0.19 & 0.98 & 0.97 & 10 \\
         Inter-Edit--CJT~\cite{interedit2026} & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & N/R & 0.24 & 0.98 & 0.96 & 5.4 \\
         \midrule

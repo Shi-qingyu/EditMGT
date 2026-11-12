@@ -1,0 +1,52 @@
+{
+  "run_id": "0f0df9b3b223a55286c66b3a7188a18e0021db92c7c8e457f683020a6ee65244",
+  "case": "add/sample_00118",
+  "model": "gide",
+  "seed": 49,
+  "instruction": "Add an umbrella next to the open book.",
+  "protocol": {
+    "backend": "gide_pie",
+    "label": "GIDE / Lumina-DiMOO + SAM 2 + SAM 3",
+    "steps": "64 inversion + 64 editing/refinement; removal skips inversion",
+    "resolution": 512,
+    "prompt_protocol": "authored captions and subjects",
+    "weights": [
+      "third_party/Lumina-DiMOO/models/Lumina-DiMOO",
+      "third_party/GIDE/models/sam2-hiera-large/sam2_hiera_large.pt",
+      "third_party/GIDE/models/sam3/sam3.pt"
+    ],
+    "settings": {
+      "cfg_scale": 4.0,
+      "temperature": 1.0,
+      "lamda1_ratio": 0.2,
+      "grounding": "sam3_text; full-frame fallback if inversion grounding is empty"
+    }
+  },
+  "source_caption": "An open book lies on a wet stone bench beside outdoor bookshelves on a rainy autumn day.",
+  "target_caption": "An open umbrella rests next to an open book on a wet stone bench beside outdoor bookshelves on a rainy autumn day.",
+  "gide": {
+    "original_prompt": "An open book lies on a wet stone bench beside outdoor bookshelves on a rainy autumn day.",
+    "editing_prompt": "An open umbrella rests next to an open book on a wet stone bench beside outdoor bookshelves on a rainy autumn day.",
+    "source_subject": "stone bench",
+    "target_subject": "umbrella",
+    "editing_type_id": "2",
+    "editing_instruction": "Add an umbrella next to the open book."
+  },
+  "created_at": "2026-11-12T11:47:58.275912+00:00",
+  "status": "ok",
+  "seconds": 59.06742234155536,
+  "source_size": [
+    512,
+    512
+  ],
+  "model_input_size": [
+    512,
+    512
+  ],
+  "output_size": [
+    512,
+    512
+  ],
+  "image": "cases/add/sample_00118/gide/seed_0000000049.png",
+  "fallback_reason": null
+}

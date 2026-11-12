@@ -286,12 +286,16 @@ def generation(args):
                 elapsed = time.perf_counter() - started
                 result = result.resize(native_size, Image.Resampling.BICUBIC)
                 save_png(image_path, result)
-                atomic_json(record_path, {
+                record = {
                     "status": "ok", "key": task["key"], "seed": seed,
                     "inference_seconds": elapsed,
                     "peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
                     "execution": {"device_name": torch.cuda.get_device_name(device)},
-                })
+                }
+                fallback = getattr(backend, "last_fallback", None)
+                if fallback:
+                    record["fallback_reason"] = fallback
+                atomic_json(record_path, record)
             except Exception as error:
                 atomic_json(record_path, {
                     "status": "error", "key": task["key"],

@@ -1,0 +1,52 @@
+{
+  "run_id": "0f0df9b3b223a55286c66b3a7188a18e0021db92c7c8e457f683020a6ee65244",
+  "case": "local/sample_00029",
+  "model": "gide",
+  "seed": 47,
+  "instruction": "Replace the plain luggage tag with a colorful patterned luggage tag.",
+  "protocol": {
+    "backend": "gide_pie",
+    "label": "GIDE / Lumina-DiMOO + SAM 2 + SAM 3",
+    "steps": "64 inversion + 64 editing/refinement; removal skips inversion",
+    "resolution": 512,
+    "prompt_protocol": "authored captions and subjects",
+    "weights": [
+      "third_party/Lumina-DiMOO/models/Lumina-DiMOO",
+      "third_party/GIDE/models/sam2-hiera-large/sam2_hiera_large.pt",
+      "third_party/GIDE/models/sam3/sam3.pt"
+    ],
+    "settings": {
+      "cfg_scale": 4.0,
+      "temperature": 1.0,
+      "lamda1_ratio": 0.2,
+      "grounding": "sam3_text; full-frame fallback if inversion grounding is empty"
+    }
+  },
+  "source_caption": "A plain beige luggage tag hangs from the handle of a silver suitcase in an airport.",
+  "target_caption": "A colorful patterned luggage tag hangs from the handle of a silver suitcase in an airport.",
+  "gide": {
+    "original_prompt": "A plain beige luggage tag hangs from the handle of a silver suitcase in an airport.",
+    "editing_prompt": "A colorful patterned luggage tag hangs from the handle of a silver suitcase in an airport.",
+    "source_subject": "luggage tag",
+    "target_subject": "luggage tag",
+    "editing_type_id": "0",
+    "editing_instruction": "Replace the plain luggage tag with a colorful patterned luggage tag."
+  },
+  "created_at": "2026-11-12T11:50:44.878089+00:00",
+  "status": "ok",
+  "seconds": 57.21325263381004,
+  "source_size": [
+    512,
+    512
+  ],
+  "model_input_size": [
+    512,
+    512
+  ],
+  "output_size": [
+    512,
+    512
+  ],
+  "image": "cases/local/sample_00029/gide/seed_0000000047.png",
+  "fallback_reason": null
+}

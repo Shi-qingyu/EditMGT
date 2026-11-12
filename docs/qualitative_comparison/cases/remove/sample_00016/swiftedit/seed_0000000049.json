@@ -1,0 +1,40 @@
+{
+  "run_id": "0f0df9b3b223a55286c66b3a7188a18e0021db92c7c8e457f683020a6ee65244",
+  "case": "remove/sample_00016",
+  "model": "swiftedit",
+  "seed": 49,
+  "instruction": "Remove the wooden handles from the rolling pin.",
+  "protocol": {
+    "backend": "swiftedit",
+    "label": "SwiftEdit v1.0",
+    "steps": "1 inversion + 1 editing",
+    "resolution": 512,
+    "prompt_protocol": "authored source and target captions",
+    "weights": [
+      "third_party/SwiftEdit/swiftedit_weights",
+      "third_party/ChordEdit/models/sd-turbo",
+      "third_party/SwiftEdit/models/sd21base",
+      "third_party/SwiftEdit/models/ip_adapter"
+    ]
+  },
+  "source_caption": "A colorful marble rolling pin with wooden handles rests on a flour-dusted cloth on a kitchen counter.",
+  "target_caption": "A colorful marble rolling pin without handles rests on a flour-dusted cloth on a kitchen counter.",
+  "gide": null,
+  "created_at": "2026-11-12T12:00:02.098604+00:00",
+  "status": "ok",
+  "seconds": 0.497498020529747,
+  "source_size": [
+    512,
+    512
+  ],
+  "model_input_size": [
+    512,
+    512
+  ],
+  "output_size": [
+    512,
+    512
+  ],
+  "image": "cases/remove/sample_00016/swiftedit/seed_0000000049.png",
+  "fallback_reason": null
+}

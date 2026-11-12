@@ -1,0 +1,35 @@
+{
+  "run_id": "0f0df9b3b223a55286c66b3a7188a18e0021db92c7c8e457f683020a6ee65244",
+  "case": "remove/sample_00016",
+  "model": "dreamlite",
+  "seed": 42,
+  "instruction": "Remove the wooden handles from the rolling pin.",
+  "protocol": {
+    "backend": "dreamlite_mobile",
+    "label": "DreamLite-mobile",
+    "steps": 4,
+    "resolution": 1024,
+    "prompt_protocol": "instruction",
+    "weights": "third_party/DreamLite/models/DreamLite-mobile"
+  },
+  "source_caption": "A colorful marble rolling pin with wooden handles rests on a flour-dusted cloth on a kitchen counter.",
+  "target_caption": "A colorful marble rolling pin without handles rests on a flour-dusted cloth on a kitchen counter.",
+  "gide": null,
+  "created_at": "2026-11-12T11:57:44.854888+00:00",
+  "status": "ok",
+  "seconds": 0.4414467141032219,
+  "source_size": [
+    512,
+    512
+  ],
+  "model_input_size": [
+    1024,
+    1024
+  ],
+  "output_size": [
+    1024,
+    1024
+  ],
+  "image": "cases/remove/sample_00016/dreamlite/seed_0000000042.png",
+  "fallback_reason": null
+}

@@ -1,0 +1,40 @@
+{
+  "run_id": "0f0df9b3b223a55286c66b3a7188a18e0021db92c7c8e457f683020a6ee65244",
+  "case": "remove/sample_00016",
+  "model": "lumina_dimoo",
+  "seed": 43,
+  "instruction": "Remove the wooden handles from the rolling pin.",
+  "protocol": {
+    "backend": "lumina_dimoo",
+    "label": "Lumina-DiMOO",
+    "steps": 64,
+    "resolution": 512,
+    "prompt_protocol": "instruction",
+    "weights": "third_party/Lumina-DiMOO/models/Lumina-DiMOO",
+    "settings": {
+      "cfg_scale": 2.5,
+      "cfg_img": 4.0,
+      "temperature": 1.0
+    }
+  },
+  "source_caption": "A colorful marble rolling pin with wooden handles rests on a flour-dusted cloth on a kitchen counter.",
+  "target_caption": "A colorful marble rolling pin without handles rests on a flour-dusted cloth on a kitchen counter.",
+  "gide": null,
+  "created_at": "2026-11-12T11:40:05.587021+00:00",
+  "status": "ok",
+  "seconds": 46.20935485512018,
+  "source_size": [
+    512,
+    512
+  ],
+  "model_input_size": [
+    512,
+    512
+  ],
+  "output_size": [
+    512,
+    512
+  ],
+  "image": "cases/remove/sample_00016/lumina_dimoo/seed_0000000043.png",
+  "fallback_reason": null
+}

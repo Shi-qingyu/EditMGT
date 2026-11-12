@@ -19,6 +19,8 @@ PIE = ROOT / "data/PIE-Bench/mapping_file.json"
 
 
 def subjects(row):
+    if row.get("source_subject") and row.get("target_subject"):
+        return row["source_subject"], row["target_subject"]
     words = (row.get("blended_word") or "").split()
     if len(words) == 2:
         return words[0], words[1]
@@ -40,7 +42,7 @@ class Backend:
     steps = 64
     resolution = 512
 
-    def __init__(self, device: str = "cuda"):
+    def __init__(self, device: str = "cuda", metadata: dict | None = None):
         sys.path.insert(0, str(REPO))
         sys.path.insert(0, str(REPO / "evaluation"))
         sys.path.insert(0, str(REPO / "sam3_repo"))
@@ -72,7 +74,8 @@ class Backend:
         self.get_editing_args = get_editing_args
         self.get_masking_args = get_masking_args
         self.edit = t2i_generate_image
-        self.metadata = json.loads(PIE.read_text(encoding="utf-8"))
+        self.metadata = (json.loads(PIE.read_text(encoding="utf-8"))
+                         if metadata is None else metadata)
 
     def prepare_source(self, source: Image.Image) -> Image.Image:
         return source.resize((512, 512), Image.Resampling.BICUBIC)
@@ -80,9 +83,10 @@ class Backend:
     @torch.inference_mode()
     @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     def generate(self, source: Image.Image, task: dict, seed: int) -> Image.Image:
-        if task["key"] not in self.metadata:
+        self.last_fallback = None
+        row = task.get("gide") or self.metadata.get(task["key"])
+        if row is None:
             raise ValueError("GIDE released code requires source/target prompt metadata")
-        row = self.metadata[task["key"]]
         source_prompt = row["original_prompt"].replace("[", "").replace("]", "")
         target_prompt = row["editing_prompt"].replace("[", "").replace("]", "")
         source_subject, target_subject = subjects(row)
@@ -102,15 +106,29 @@ class Backend:
                     subject_token=source_subject, edit_type=edit_type,
                     sam2_predictor=self.sam2, mask_mode="sam3_text",
                 ).convert("RGB")
-            mask_args = self.get_masking_args(source, source_prompt, cache, str(scratch_path / "masking_map.png"))
-            mask_args.seed = seed
-            latents_mask = self.edit(
-                mask_args, self.tokenizer, self.model, self.vq,
-                if_edit=False, if_inversion=True, device=str(self.device),
-                use_attention_control=True, sam3_processor=self.sam3,
-                subject_token=source_subject, edit_type=edit_type,
-                sam2_predictor=self.sam2, mask_mode="sam3_text",
-            )
+            def invert(region_cache, mask_mode):
+                mask_args = self.get_masking_args(
+                    source, source_prompt, region_cache, str(scratch_path / "masking_map.png")
+                )
+                mask_args.seed = seed
+                return self.edit(
+                    mask_args, self.tokenizer, self.model, self.vq,
+                    if_edit=False, if_inversion=True, device=str(self.device),
+                    use_attention_control=True, sam3_processor=self.sam3,
+                    subject_token=source_subject, edit_type=edit_type,
+                    sam2_predictor=self.sam2, mask_mode=mask_mode,
+                )
+
+            latents_mask = invert(cache, "sam3_text")
+            if not any(Path(cache).glob("mask_step_*.pt")):
+                # SAM 3 and the repository's attention/SAM 2 fallback can both
+                # yield an empty region. Invert the full source frame instead
+                # of loading inversion files that were never written.
+                self.last_fallback = "full_frame_after_empty_grounding"
+                cache = str(scratch_path / "cache_full")
+                latents_mask = invert(cache, "full")
+                if not any(Path(cache).glob("mask_step_*.pt")):
+                    raise RuntimeError("GIDE full-frame inversion wrote no mask steps")
             args = self.get_editing_args(source, target_prompt, target_prompt, cache,
                                          output, lamda1_ratio=0.2,
                                          target_subject_token=target_subject)

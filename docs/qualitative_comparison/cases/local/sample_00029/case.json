@@ -1,0 +1,39 @@
+{
+  "key": "local/sample_00029",
+  "edit_type": "local",
+  "output_dir": "cases/local/sample_00029",
+  "original_instruction": null,
+  "instruction": "Replace the plain luggage tag with a colorful patterned luggage tag.",
+  "instruction_origin": "Reconstructed from the legacy comparison panel; original instruction is unavailable.",
+  "instruction_note": "",
+  "source_input": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/cherry_pick/local/sample_00029/comparison.png",
+  "source_crop": [
+    0,
+    52,
+    512,
+    564
+  ],
+  "source_sha256": "8df0694f0c68992935f5f21b1a017264a7a3c67b06fb5342b0286690e8c2a30a",
+  "source_note": "First source tile from legacy comparison, 512px preview.",
+  "source_caption": "A plain beige luggage tag hangs from the handle of a silver suitcase in an airport.",
+  "caption": "A colorful patterned luggage tag hangs from the handle of a silver suitcase in an airport.",
+  "caption_origin": "Authored supplemental captions in cherry_pick_cases.json",
+  "gide": {
+    "original_prompt": "A plain beige luggage tag hangs from the handle of a silver suitcase in an airport.",
+    "editing_prompt": "A colorful patterned luggage tag hangs from the handle of a silver suitcase in an airport.",
+    "source_subject": "luggage tag",
+    "target_subject": "luggage tag",
+    "editing_type_id": "0",
+    "editing_instruction": "Replace the plain luggage tag with a colorful patterned luggage tag."
+  },
+  "references": {
+    "comparison.png": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/cherry_pick/local/sample_00029/comparison.png",
+    "generation_mask.png": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/cherry_pick/local/sample_00029/generation_mask.png",
+    "ours.png": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/cherry_pick/local/sample_00029/generated.png"
+  },
+  "reference_sha256": {
+    "comparison.png": "8df0694f0c68992935f5f21b1a017264a7a3c67b06fb5342b0286690e8c2a30a",
+    "generation_mask.png": "21772b7a1533e06cb85e708ba1633a75a2198fdfed581aab0d5d0c949fa0fe3f",
+    "ours.png": "be3ae865b3d4d95a5640b97de3849e5721636e9e1989f6dc9152fb7dcd19aee6"
+  }
+}

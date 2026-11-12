@@ -1,0 +1,41 @@
+{
+  "run_id": "0f0df9b3b223a55286c66b3a7188a18e0021db92c7c8e457f683020a6ee65244",
+  "case": "local/sample_00029",
+  "model": "spotedit",
+  "seed": 42,
+  "instruction": "Replace the plain luggage tag with a colorful patterned luggage tag.",
+  "protocol": {
+    "backend": "spotedit_flux2_4b",
+    "label": "SpotEdit / FLUX.2 Klein 4B (local four-step adaptation)",
+    "steps": 4,
+    "resolution": 1024,
+    "prompt_protocol": "instruction",
+    "weights": "third_party/SpotEdit/models/FLUX.2-klein-4B",
+    "settings": {
+      "guidance_scale": 1.0,
+      "threshold": 0.4,
+      "initial_steps": 1,
+      "reset_steps": []
+    }
+  },
+  "source_caption": "A plain beige luggage tag hangs from the handle of a silver suitcase in an airport.",
+  "target_caption": "A colorful patterned luggage tag hangs from the handle of a silver suitcase in an airport.",
+  "gide": null,
+  "created_at": "2026-11-12T11:30:26.733892+00:00",
+  "status": "ok",
+  "seconds": 1.5302719585597515,
+  "source_size": [
+    512,
+    512
+  ],
+  "model_input_size": [
+    1024,
+    1024
+  ],
+  "output_size": [
+    1024,
+    1024
+  ],
+  "image": "cases/local/sample_00029/spotedit/seed_0000000042.png",
+  "fallback_reason": null
+}

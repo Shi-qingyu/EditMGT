@@ -1,0 +1,52 @@
+{
+  "run_id": "0f0df9b3b223a55286c66b3a7188a18e0021db92c7c8e457f683020a6ee65244",
+  "case": "remove/sample_00016",
+  "model": "gide",
+  "seed": 43,
+  "instruction": "Remove the wooden handles from the rolling pin.",
+  "protocol": {
+    "backend": "gide_pie",
+    "label": "GIDE / Lumina-DiMOO + SAM 2 + SAM 3",
+    "steps": "64 inversion + 64 editing/refinement; removal skips inversion",
+    "resolution": 512,
+    "prompt_protocol": "authored captions and subjects",
+    "weights": [
+      "third_party/Lumina-DiMOO/models/Lumina-DiMOO",
+      "third_party/GIDE/models/sam2-hiera-large/sam2_hiera_large.pt",
+      "third_party/GIDE/models/sam3/sam3.pt"
+    ],
+    "settings": {
+      "cfg_scale": 4.0,
+      "temperature": 1.0,
+      "lamda1_ratio": 0.2,
+      "grounding": "sam3_text; full-frame fallback if inversion grounding is empty"
+    }
+  },
+  "source_caption": "A colorful marble rolling pin with wooden handles rests on a flour-dusted cloth on a kitchen counter.",
+  "target_caption": "A colorful marble rolling pin without handles rests on a flour-dusted cloth on a kitchen counter.",
+  "gide": {
+    "original_prompt": "A colorful marble rolling pin with wooden handles rests on a flour-dusted cloth on a kitchen counter.",
+    "editing_prompt": "A colorful marble rolling pin without handles rests on a flour-dusted cloth on a kitchen counter.",
+    "source_subject": "wooden handles",
+    "target_subject": "rolling pin",
+    "editing_type_id": "3",
+    "editing_instruction": "Remove the wooden handles from the rolling pin."
+  },
+  "created_at": "2026-11-12T11:53:18.325906+00:00",
+  "status": "ok",
+  "seconds": 19.43846431002021,
+  "source_size": [
+    512,
+    512
+  ],
+  "model_input_size": [
+    512,
+    512
+  ],
+  "output_size": [
+    512,
+    512
+  ],
+  "image": "cases/remove/sample_00016/gide/seed_0000000043.png",
+  "fallback_reason": null
+}
