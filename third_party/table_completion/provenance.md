@@ -159,20 +159,15 @@ checkpoints; their conditioning and image resolution vary by model.
 - DICE's released Paella path requires a source description and target
   description. PIE-Bench provides both, so the adapter uses 32 inversion and
   32 editing steps with the released Paella, VQGAN, ByT5 and CLIP-H weights.
-  The local MagicBrush and Inter-Edit releases provide edit instructions only;
-  their DICE cells remain unavailable pending a documented caption protocol.
-  A one-image PIE-Bench smoke test completed with a valid output image. Its
-  full PIE-Bench evaluation is queued after UltraEdit.
+  Its local PIE-Bench evaluation completed on all 700 cases. The local
+  MagicBrush and Inter-Edit releases provide edit instructions only; those
+  evaluations use the input-only caption protocol described below.
 - GIDE's released pipeline requires source and target descriptions plus
   source and target subject tokens. The PIE-Bench adaptation takes paired
   captions and `blended_word` when available, then uses prompt annotations or
   a text heuristic for missing subjects. It uses local Lumina-DiMOO, SAM 2
-  and SAM 3 checkpoints. Its full PIE-Bench evaluation is queued after DICE.
-  This adapted input protocol must be distinguished from models that receive
-  only an editing instruction; MagicBrush and Inter-Edit have no matching
-  source/target caption and subject annotation protocol. A one-image
-  PIE-Bench smoke test completed after enabling BF16 autocast for the SAM 3
-  vision encoder. A separate functional check produced valid outputs for
+  and SAM 3 checkpoints. Its local PIE-Bench evaluation completed on all 700
+  cases. A separate functional check produced valid outputs for
   five representative PIE-Bench types: object replacement, addition,
   removal, background, and style. Its output and status JSON are under
   [`pie_bench_smoke_types`](../../outputs/real_time_baselines/gide_pie/pie_bench_smoke_types);
@@ -183,6 +178,21 @@ checkpoints; their conditioning and image resolution vary by model.
   uses no target image or benchmark annotation mask.
   The repository file `evaluation/evaluate_magicbrush.py` instantiates
   InstructPix2Pix, so it does not provide GIDE MagicBrush scores.
+
+For MagicBrush test and Inter-Edit test/en, the released data has no paired
+source/target captions. We run BLIP on each provided source image, use
+FLAN-T5 to rewrite the caption with the edit instruction, and append the
+original instruction to the target prompt so the requested change is always
+present. Multi-turn MagicBrush prompts propagate the preceding text prompt;
+standalone turns caption their supplied source. GIDE's subject words and
+add/remove type come from deterministic instruction heuristics. No target
+image or benchmark annotation mask is used to create these prompts. This is
+an adapted input protocol, recorded in each run's `run.json`; it should be
+identified as such beside the scores. The preparation code and frozen input
+manifests are in `third_party/table_completion/prepare_dice_gide_captions.py`
+and `outputs/real_time_baselines/caption_protocol/`, respectively. The full
+MagicBrush/Inter-Edit evaluations are launched by
+`third_party/table_completion/run_dice_gide_all.sh`.
 
 ## User-provided DICE/GIDE PIE-Bench results
 

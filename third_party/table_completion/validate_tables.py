@@ -21,6 +21,10 @@ REALTIME_ROWS = {
     "MMaDA-Parallel": "mmada_parallel_a",
     "NEP": "nep_512",
 }
+DICE_GIDE_ROWS = {
+    "DICE": ("dice_paella_blip_flan", "dice_paella"),
+    "GIDE": ("gide_pie_blip_flan", "gide_pie"),
+}
 
 
 def table_rows(name: str, width: int) -> tuple[dict[str, list[str]], int]:
@@ -111,6 +115,34 @@ def main() -> None:
             values += [ie["overall"][key]["mean"] for key in inter_keys]
             check_rounded(row[3:], 0, values)
             completed += 2
+    for label, (adapted_dir, pie_dir) in DICE_GIDE_ROWS.items():
+        paths = {
+            "magicbrush": REALTIME / adapted_dir / "magicbrush/metrics/summary.json",
+            "inter_edit": REALTIME / adapted_dir / "inter_edit/metrics/summary.json",
+            "pie_bench": REALTIME / pie_dir / "pie_bench/metrics/summary.json",
+        }
+        if not all(path.is_file() for path in paths.values()):
+            continue
+        summaries = {name: json.loads(path.read_text()) for name, path in paths.items()}
+        for name, result in summaries.items():
+            assert result["complete"] and not result["failed_predictions"], paths[name]
+        mb, ie, pb = (summaries[name] for name in ("magicbrush", "inter_edit", "pie_bench"))
+        assert mb["selected_predictions"] == 1571
+        assert ie["selected_predictions"] == 3413 and ie["scored_predictions"] == 3411
+        assert pb["selected_predictions"] == 700
+        mb_row = next(cells for key, cells in magic_rows.items() if key.startswith(label + "~\\cite{"))
+        check_rounded([mb_row[2]], 0, [mb["timing"]["mean_seconds"]])
+        one = mb["by_protocol"]["single_turn_all"]["metrics"]
+        multi = mb["by_protocol"]["multi_turn_final"]["metrics"]
+        check_rounded(mb_row[3:], 0, [block[key]["mean"] for block in (one, multi)
+                                       for key in ("l1", "l2", "clip-i", "dino")])
+        pie_row = next(cells for key, cells in pie_rows.items() if key.startswith(label + "~\\cite{"))
+        check_rounded(pie_row[2].split("/"), 0,
+                      [pb["timing"]["mean_seconds"], ie["timing"]["mean_seconds"]])
+        check_rounded(pie_row[3:], 0,
+                      [pb["overall"][key]["mean"] for key in pie_keys]
+                      + [ie["overall"][key]["mean"] for key in inter_keys])
+        completed += 3
     print(f"magicbrush.tex: {len(magic_rows)} method rows, {magic_nr} N/R cells")
     print(f"pie_inter.tex: {len(pie_rows)} method rows, {pie_nr} N/R cells")
     print("Native EditMGT table values match complete local summaries")

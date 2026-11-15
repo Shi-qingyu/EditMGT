@@ -47,3 +47,24 @@ Use `RUN_TAG=name` to write a fresh run to
 after every selected prediction is present and `metrics/summary.json` says
 `complete=true`. Model versions, prompts and image preparation are recorded
 in [`provenance.md`](provenance.md).
+
+## DICE and GIDE on all three benchmarks
+
+PIE-Bench has paired captions, so the completed DICE and GIDE runs use those
+directly. MagicBrush and Inter-Edit have only edit instructions. The local
+adapter captions each supplied source image with BLIP and rewrites the caption
+with FLAN-T5 using the instruction; the original instruction is retained in
+the target prompt. GIDE subject words are inferred from the instruction.
+No target image or benchmark edit mask enters prompt preparation.
+
+The fixed input manifests are under
+`outputs/real_time_baselines/caption_protocol/`. After they exist, run:
+
+```bash
+GPU_IDS=0,1,2,3,4,5,6,7 bash third_party/table_completion/run_dice_gide_all.sh
+```
+
+This resumes full MagicBrush test and Inter-Edit test/en inference for both
+models, reuses their completed PIE-Bench results, updates the two paper tables,
+and writes `docs/dice_gide_three_benchmarks.md` after all six summaries are
+complete. The downloaded BLIP weights are ignored by Git under `models/`.

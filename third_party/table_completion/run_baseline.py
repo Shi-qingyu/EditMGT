@@ -116,14 +116,14 @@ MODEL_CONFIG = {
         "model_weights": "dome272/Paella@main, google/byt5-xl@main, laion/CLIP-ViT-H-14-laion2B-s32B-b79K@main",
         "num_inference_steps": "32 inversion + 32 editing",
         "resolution": 512,
-        "prompt_protocol": "PIE-Bench official source and target captions; DICE CFG 10, lambda 0.7, tau 0.9",
+        "prompt_protocol": "PIE-Bench official captions; MagicBrush/Inter-Edit BLIP source captions and FLAN-T5 target rewrites with original edit instruction appended; DICE CFG 10, lambda 0.7, tau 0.9",
     },
     "gide_pie": {
         "model_repo": "third_party/GIDE with SAM 2 and SAM 3",
         "model_weights": "Alpha-VLLM/Lumina-DiMOO@main, facebook/sam2-hiera-large@main, facebook/sam3@main",
         "num_inference_steps": "64 inversion + 64 editing/refinement",
         "resolution": 512,
-        "prompt_protocol": "PIE-Bench source/target captions plus paired subject words, local GIDE adaptation",
+        "prompt_protocol": "PIE-Bench captions/subjects; MagicBrush/Inter-Edit BLIP source captions, FLAN-T5 target rewrites with original edit instruction appended, and instruction-derived subjects; local GIDE adaptation",
     },
 }
 
@@ -163,6 +163,24 @@ def selected_reference(args):
 
 def prepare(args):
     selection, reference = selected_reference(args)
+    caption_protocol = None
+    if args.model in ("dice_paella", "gide_pie") and args.benchmark != "pie_bench":
+        manifest_path = OUTPUT / "caption_protocol" / f"{args.benchmark}.json"
+        raw_manifest = manifest_path.read_bytes()
+        manifest = json.loads(raw_manifest)
+        if len(manifest) < len(selection):
+            raise ValueError(f"Caption manifest is incomplete: {manifest_path}")
+        for task in selection:
+            row = manifest[task["key"]]
+            task["_dice_source_caption"] = row["source_caption"]
+            task["_dice_target_caption"] = row["caption"]
+            task["gide"] = row["gide"]
+        caption_protocol = {
+            "manifest": str(manifest_path.relative_to(ROOT)),
+            "sha256": hashlib.sha256(raw_manifest).hexdigest(),
+            "source": "BLIP on supplied source images; FLAN-T5 rewrite from source caption and edit instruction, with instruction appended to target prompt",
+            "target_images_used": False,
+        }
     root = args.output_dir.resolve()
     root.mkdir(parents=True, exist_ok=True)
     generation = {
@@ -173,6 +191,8 @@ def prepare(args):
         "warmup": args.warmup,
         "timing_scope": "synchronized model pipeline; excludes image I/O, warmup, and metrics",
     }
+    if caption_protocol:
+        generation["caption_protocol"] = caption_protocol
     info = {
         "version": 1, "benchmark": reference["benchmark"],
         "created_at": datetime.now(timezone.utc).isoformat(),

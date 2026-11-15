@@ -124,12 +124,14 @@ class Backend:
 
     @torch.inference_mode()
     def generate(self, source: Image.Image, task: dict, seed: int) -> Image.Image:
-        if not task.get("source_caption") or not task.get("caption"):
+        source_caption = task.get("_dice_source_caption") or task.get("source_caption")
+        target_caption = task.get("_dice_target_caption") or task.get("caption")
+        if not source_caption or not target_caption:
             raise ValueError("DICE Paella requires source and target captions")
         torch.manual_seed(seed)
         source_tensor = T.ToTensor()(source).unsqueeze(0).to(self.device)[:, :3]
-        src_cond = self._condition(task["source_caption"])
-        tgt_cond = self._condition(task["caption"])
+        src_cond = self._condition(source_caption)
+        tgt_cond = self._condition(target_caption)
         uncond = self._condition(NEGATIVE)
         with torch.autocast(device_type="cuda"), torch.backends.cuda.sdp_kernel(
             enable_flash=True, enable_math=True, enable_mem_efficient=True,
