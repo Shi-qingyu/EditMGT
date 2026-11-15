@@ -1,0 +1,112 @@
+{
+  "captured_at_utc": "2026-11-15T05:08:39.563400+00:00",
+  "source_metadata": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/outputs/vanilla_decode_order_quant_32/metadata.json",
+  "selection": {
+    "benchmark": "Inter-Edit",
+    "split": "test",
+    "language": "en",
+    "count": 32,
+    "keys": [
+      "sample_02586",
+      "sample_04330",
+      "sample_02832",
+      "sample_04776",
+      "sample_02168",
+      "sample_03987",
+      "sample_02431",
+      "sample_05134",
+      "sample_04763",
+      "sample_04972",
+      "sample_05854",
+      "sample_01969",
+      "sample_03823",
+      "sample_04852",
+      "sample_02450",
+      "sample_05378",
+      "sample_03944",
+      "sample_02217",
+      "sample_06163",
+      "sample_01059",
+      "sample_01519",
+      "sample_03579",
+      "sample_01800",
+      "sample_04725",
+      "sample_00795",
+      "sample_00490",
+      "sample_05517",
+      "sample_02719",
+      "sample_01466",
+      "sample_04990",
+      "sample_02732",
+      "sample_04304"
+    ]
+  },
+  "model": "released vanilla EditMGT",
+  "config": {
+    "model_path": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/checkpoint/EditMGT",
+    "resolution": 1024,
+    "num_inference_steps": 36,
+    "guidance_scale": 6.0,
+    "reference_strength": 1.1,
+    "negative_prompt": "worst quality, low quality, low res, blurry, distortion, watermark, logo, signature, text, jpeg artifacts, signature, sketch, duplicate, ugly, identifying mark",
+    "dtype": "bfloat16"
+  },
+  "measurement": {
+    "branch": "positive instruction CFG branch (batch index 1)",
+    "layer_output": "post-block residual hidden states; 14 two-stream + 28 single-stream",
+    "alignment": "same token indices across each pair of blocks/steps; L2 normalize each token before dot product",
+    "sampling": "up to 32 evenly spaced non-padding instruction tokens and 32 evenly spaced source image tokens; same indices at all blocks and steps of each image",
+    "tokens_per_modality": 32,
+    "aggregation": "per-token mean, then layer/step mean, then image mean",
+    "cache": false,
+    "mask": "not supplied"
+  },
+  "per_image_stats": {
+    "text_adjacent_block_by_step": {
+      "mean": 0.9749568415979847,
+      "std": 0.002265412602332752,
+      "min": 0.9708605905373892,
+      "max": 0.9796546605948188
+    },
+    "text_adjacent_step_by_block": {
+      "mean": 0.9974803822938683,
+      "std": 0.001364774247443647,
+      "min": 0.9903809655685814,
+      "max": 0.998534137091669
+    },
+    "text_block_similarity_off_diagonal": {
+      "mean": 0.5736422735731102,
+      "std": 0.01318126579594399
+    },
+    "text_step_similarity_off_diagonal": {
+      "mean": 0.9849597288266061,
+      "std": 0.0033185805058852775
+    },
+    "source_adjacent_block_by_step": {
+      "mean": 0.9801488869109249,
+      "std": 0.0018673226227539801,
+      "min": 0.975524942160945,
+      "max": 0.9841959171178865
+    },
+    "source_adjacent_step_by_block": {
+      "mean": 0.9992877256936159,
+      "std": 0.0001180546319450396,
+      "min": 0.9990406762580483,
+      "max": 0.9994694007902729
+    },
+    "source_block_similarity_off_diagonal": {
+      "mean": 0.8135529408906343,
+      "std": 0.01050151002568178
+    },
+    "source_step_similarity_off_diagonal": {
+      "mean": 0.9950541932904531,
+      "std": 0.0011810685067475991
+    }
+  },
+  "matrices_file": "vanilla_condition_similarity_matrices.npz",
+  "figures": {
+    "pdf": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/feature_similarity/vanilla_condition_similarity.pdf",
+    "svg": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/feature_similarity/vanilla_condition_similarity.svg",
+    "png": "/mnt/geminihzceph/qingyushi/projects/image_edit/EditMGT/docs/feature_similarity/vanilla_condition_similarity.png"
+  }
+}
